@@ -59,6 +59,10 @@
 #define LEFT_UPPER_SERVO_PIN "LeftUpperServo_PIN"
 #define LEFT_UPPER_SERVO_CHANNEL "LeftUpperServo_CHANNEL"
 
+#define PD_CFG1_PIN "PD_CFG1_PIN"
+#define PD_CFG2_PIN "PD_CFG2_PIN"
+#define PD_CFG3_PIN "PD_CFG3_PIN"
+
 // BLDC (SSR1)
 #define BLDC_ENCODER_PIN "BLDC_Encoder_PIN"
 #define BLDC_CHIPSELECT_PIN "BLDC_ChipSelect_PIN"
@@ -183,6 +187,9 @@ public:
 
     int8_t i2cScl() const { return m_i2cScl; }
     void setI2cScl(const int8_t &i2cScl) { m_i2cScl = i2cScl; }
+
+    int8_t pdCFG1() const return m_pdCFG1; }
+    void setPdCFG1(const int8_t index) 
 
     // void setChannelFrequency(ESPTimerChannelNum channel, int frequency) {
     //     int8_t timer = getTimer(channel);
@@ -378,6 +385,10 @@ private:
 
 };
 
+class PinMapSSR1PCB : public PinMapSSR1 {
+
+}
+
 class PinMapOSR : public PinMap {
 public:
     static PinMapOSR* getInstance()
@@ -476,6 +487,9 @@ private:
     int8_t m_rightUpperServoChannel = RIGHT_UPPER_SERVO_CHANNEL_DEFAULT;
     int8_t m_leftUpperServo = LEFT_UPPER_SERVO_PIN_DEFAULT;
     int8_t m_leftUpperServoChannel = LEFT_UPPER_SERVO_CHANNEL_DEFAULT;
+    int8_t m_pdCFG1 = PD_CFG1_PIN_DEFAULT;
+    int8_t m_pdCFG2 = PD_CFG2_PIN_DEFAULT;
+    int8_t m_pdCFG3 = PD_CFG3_PIN_DEFAULT;
     void overideDefaults() override {}
 };
 

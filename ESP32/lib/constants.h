@@ -110,3 +110,11 @@ const Channel ChannelMapBLDC[10] = {
     {"A2","Lube",true,false,TCODE_MIN,TCODE_MIN,TCODE_MAX},
     {"A3","Auxiliary",false,false,TCODE_MIN,TCODE_MID,TCODE_MAX}
 };
+
+constexpr enum Levels : uint8_t {
+    PD5V = 0,
+    PD9V,
+    PD12V,
+    PD15V,
+    PD20V,
+};
