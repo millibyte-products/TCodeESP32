@@ -6,6 +6,10 @@
 #define FIRMWARE_VERSION_NAME "0.4b\n"
 #define MAX_BUTTON_SETS 4
 #define MAX_BUTTONS 4
+#define MAX_PD_CFG_PINS 3
+#define MAX_BRUSHED_PINS 2
+#define BUS_VOLTAGE_COEFFICIENT_DEFAULT 1.0f
+#define SERVO_VOLTAGE_COEFFICIENT_DEFAULT 1.0f
 #define MAX_COMMAND 256
 #define TCODE_MIN 0
 #define TCODE_MID 5000
@@ -109,12 +113,4 @@ const Channel ChannelMapBLDC[10] = {
     {"A1","Suck level",false,false,TCODE_MIN,TCODE_MID,TCODE_MAX},
     {"A2","Lube",true,false,TCODE_MIN,TCODE_MIN,TCODE_MAX},
     {"A3","Auxiliary",false,false,TCODE_MIN,TCODE_MID,TCODE_MAX}
-};
-
-constexpr enum Levels : uint8_t {
-    PD5V = 0,
-    PD9V,
-    PD12V,
-    PD15V,
-    PD20V,
 };

@@ -42,6 +42,10 @@
 #define TEMP_PIN "Temp_PIN"
 #define TWIST_FEEDBACK_PIN "TwistFeedBack_PIN"
 #define BUTTON_SET_PINS "Button_Set_PIN"
+#define SERVO_POWER_ENABLE_PIN "Servo_Power_Enable_PIN"
+#define SERVO_VOLTAGE_PIN "Servo_Voltage_Feedback_PIN"
+#define BUS_VOLTAGE_PIN "Bus_Voltage_Feedback_PIN"
+#define BRUSHED_DRIVE_PINS "Brushed_Drive_PIN"
 
 // OSR
 #define RIGHT_SERVO_PIN "RightServo_PIN"
@@ -59,10 +63,7 @@
 #define LEFT_UPPER_SERVO_PIN "LeftUpperServo_PIN"
 #define LEFT_UPPER_SERVO_CHANNEL "LeftUpperServo_CHANNEL"
 
-#define PD_CFG1_PIN "PD_CFG1_PIN"
-#define PD_CFG2_PIN "PD_CFG2_PIN"
-#define PD_CFG3_PIN "PD_CFG3_PIN"
-
+#define PD_CFG_PINS "PD_CFG_PIN"
 // BLDC (SSR1)
 #define BLDC_ENCODER_PIN "BLDC_Encoder_PIN"
 #define BLDC_CHIPSELECT_PIN "BLDC_ChipSelect_PIN"
@@ -188,8 +189,44 @@ public:
     int8_t i2cScl() const { return m_i2cScl; }
     void setI2cScl(const int8_t &i2cScl) { m_i2cScl = i2cScl; }
 
-    int8_t pdCFG1() const return m_pdCFG1; }
-    void setPdCFG1(const int8_t index) 
+    int8_t pdCFG(const int8_t index) const { return m_pdCFG[index]; }
+    void setPdCFG(const int8_t pin, const int8_t index)  { 
+        if (index >= MAX_PD_CFG_PINS) {
+            LogHandler::error("Pin_map", "Invalid index for pd CFG pin %d", index);
+            return;
+        }
+        m_pdCFG[index] = pin;
+    }
+
+    int8_t servoPowerEnable() const { return m_servoPowerEnable; }
+    void setServoPowerEnable(const in8_t pin) {
+        m_servoPowerEnable = pin;
+    }
+    int8_t busVoltage() const { return m_busVoltage; }
+    void setBusVoltage(const int8_t pin) {
+        m_busVoltage = pin;
+    }
+    float busVoltageCoefficient() const { return m_busVoltageCoefficient; }
+    void setBusVoltageCoefficient(const float coeff) { m_busVoltageCoefficient = coeff; }
+    int8_t servoVoltage() const { return m_servoVoltage; }
+    void setServoVoltage(const int8_t pin) {
+        m_servoVoltage = pin;
+    }
+    float servoVoltageCoefficient() const { return m_servoVoltageCoefficient; }
+    void setServoVoltageCoefficient(const float coeff) {
+        m_servoVoltageCoefficient = coeff;
+    }
+
+    int8_t brushedMotorDrive(const int8_t index) {
+        return m_brushedMotorDrive[index];
+    }
+    void setBrushedMotorDrive(const int8_t pin, const int8_t index) {
+        if (index >= MAX_BRUSHED_PINS) {
+            LogHandler::error("Pin_map", "Invalid index for brushed pin %d", index);
+            return;
+        }
+        m_brushedMotorDrive[index] = pin;
+    }
 
     // void setChannelFrequency(ESPTimerChannelNum channel, int frequency) {
     //     int8_t timer = getTimer(channel);
@@ -322,7 +359,7 @@ private:
     int8_t m_caseFanChannel = CASE_FAN_CHANNEL_DEFAULT;
     int8_t m_heater = HEATER_PIN_DEFAULT;
     int8_t m_heaterChannel = HEATER_CHANNEL_DEFAULT;
-    // Analog
+    // Analog & Digital
     int8_t m_twistFeedBack = TWIST_FEEDBACK_PIN_DEFAULT;
     int8_t m_lubeButton = LUBE_BUTTON_PIN_DEFAULT;
     int8_t m_internalTemp = INTERNAL_TEMP_PIN_DEFAULT;
@@ -331,6 +368,13 @@ private:
     int8_t m_i2cSda = I2C_SDA_PIN_DEFAULT;
     int8_t m_i2cScl = I2C_SCL_PIN_DEFAULT;
     int8_t m_buttonSetPins[MAX_BUTTON_SETS] = BUTTON_SET_PINS_DEFAULT;
+    int8_t m_pdCFG[MAX_PD_CFG_PINS] = PD_CFG_PINS_DEFAULT;
+    int8_t m_servoPowerEnable = POWER_ENABLE_PIN_DEFAULT;
+    int8_t m_busVoltage = BUS_VOLTAGE_PIN_DEFAULT;
+    int8_t m_servoVoltage = SERVO_VOLTAGE_PIN_DEFAULT;
+    float m_busVoltageCoefficient = BUS_VOLTAGE_COEFFICIENT_DEFAULT;
+    float m_servoVoltageCoefficient = SERVO_VOLTAGE_COEFFICIENT_DEFAULT;
+    int8_t m_brushedMotorDrive[MAX_BRUSHED_PINS] = BRUSHED_MOTOR_DRIVE_DEFAULT;
 
     virtual void overideDefaults() =0;
 
@@ -386,7 +430,38 @@ private:
 };
 
 class PinMapSSR1PCB : public PinMapSSR1 {
+    private:
+        PinMapSSR1PCB* getInstance() {
+            static PinMapSSR1PCB instance(DeviceType::SSR1, BoardType::MILLIBYTE);
+            return &instance;
+        }
 
+        void overrideDefaults() override {
+            setEncoder(-1);
+            setChipSelect(5);
+            setEnable(4);
+            setHallEffect(14);
+            setPwmChannel1(2);
+            setPwmChannel2(16);
+            setPwmChannel3(17);
+            setInternalTemp(-1);
+            //setCaseFan(32); // Future, HWv1.5?
+            //setCaseFanChannel(); // Future, HWv1.5?
+            setSqueeze(-1);
+            setVibe0(-1);
+            setVibe1(-1);
+            setVibe2(-1);
+            setVibe3(-1);
+            setLubeButton(-1);
+            setSleeveTemp(-1);
+            setHeater(-1);
+            for(int8_t i = 0; i < MAX_BUTTONS; ++i)
+            {
+                setButtonSetPin(-1, i);
+            }
+        }
+    protected:
+    PinMapSSR1PCB(DeviceType deviceType, BoardType boardType) : PinMapSSR1(deviceType, boardType) {}
 }
 
 class PinMapOSR : public PinMap {
@@ -557,3 +632,25 @@ public:
 protected: 
     PinMapSR6MB(DeviceType deviceType, BoardType boardType) : PinMapSR6(deviceType, boardType) {}
 };
+
+class PinMapSR6PCB : public PinMapSR6 {
+    public:
+        static PinMapSR6PCB* getInstance()
+        {
+            static PinMapSR6PCB instance(DeviceType::SR6, BoardType::MILLIBYTE);
+            return &instance;
+        }
+
+        void overrideDefaults() override {
+            setPdCFGPin(27, 0);
+            setPdCFGPin(14, 1);
+            setPdCFGPin(12, 2);
+            setServoPowerEnablePin(13);
+            setBusVoltage(32);
+            setBusVoltageCoefficient(0.2f);
+            setServoVoltage(26);
+            setServoVoltageCoefficient(0.2f);
+        }
+    protected: 
+        PinMapSR6PCB(DeviceType deviceType, BoardType boardType) : PinMapSR6(deviceType, boardType) {}
+}

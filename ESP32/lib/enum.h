@@ -42,7 +42,9 @@ enum class BoardType: int
     ZERO,
     N8R8,
     CRIMZZON,
-    ISAAC
+    ISAAC,
+    SSR1PCB,
+    SR6PCB,
 };
 
 enum class MotorType: int
@@ -97,4 +99,12 @@ enum class ESPTimerChannelNum: int8_t {
     LOW3_CH6,
     LOW3_CH7,
     MAX
+};
+
+constexpr enum PDLevels : uint8_t {
+    PD5V = 0,
+    PD9V,
+    PD12V,
+    PD15V,
+    PD20V,
 };

@@ -932,6 +932,10 @@ private:
             {I2C_SDA_PIN, "I2C SDA PIN", "Pin of the I2C SDA", SettingType::Number, I2C_SDA_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::System, SettingProfile::Pin}},
             {I2C_SCL_PIN, "I2C SCL PIN", "Pin of the I2C SCL", SettingType::Number, I2C_SCL_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::System, SettingProfile::Pin}},
             {BUTTON_SET_PINS, "Button set pins", "Pins for each button set. (Max 4)", SettingType::ArrayInt, BUTTON_SET_PINS_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
+            {SERVO_POWER_ENABLE_PIN, "Servo power enable pin", "Enable power regulator for servo power", SettingType::Number, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
+            {SERVO_VOLTAGE_PIN, "Servo_Voltage_Feedback_PIN", "Analog voltage feedback on the servo voltage",  SettingType::Number, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
+            {BUS_VOLTAGE_PIN, "Bus_Voltage_Feedback_PIN", "Analog voltage feedback on input bus",  SettingType::Number, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
+            {BURSHED_DRIVE_PINS, "Brushed_Drive_PIN", "Brushed motor drive pins", SettingType::ArrayInt, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
             // BLDC
             {BLDC_ENCODER_PIN, "Encoder PIN", "Pin the BLDC encoder is on", SettingType::Number, BLDC_ENCODER_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Bldc, SettingProfile::Pin}},
             {BLDC_CHIPSELECT_PIN, "Chipselect PIN", "Pin the BLDC chip select is on", SettingType::Number, BLDC_CHIPSELECT_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Bldc, SettingProfile::Pin}},
@@ -1097,7 +1101,7 @@ private:
             loadCommonLiveCache(LOG_INCLUDETAGS);
             return true;
         } else if(!strcmp(setting->name, LOG_EXCLUDETAGS)) {
-            std::vector<const char*> excludesVec;
+            std::vector<const char*> excludesVec;`
             doc[LOG_EXCLUDETAGS] = excludesVec;
             loadCommonLiveCache(LOG_EXCLUDETAGS);
             return true;
@@ -1105,6 +1109,12 @@ private:
             std::vector<int8_t> vec = { BUTTON_SET_PINS_1, BUTTON_SET_PINS_2, BUTTON_SET_PINS_3, BUTTON_SET_PINS_4 };
             doc[BUTTON_SET_PINS] = vec;
             return true;
+        } else if (!strcmp(setting->name. PD_CFG_PINS)) {
+            std::vector<int8_t> vec = { PD_CFG1_PIN, PD_CFG2_PIN, PD_CFG3_PIN };
+            doc[PD_CFG_PINS] = vec;
+        } else if (!strcmp(setting->name, BRUSHED_DRIVE_PINS)) {
+            std::vector<int8_t> vec = { BRUSHED_DRIVE_PIN_1, BRUSHED_DRIVE_PIN_2 };
+            doc[BRUSHED_DRIVE_PINS] = vec;
         }
         LogHandler::error(m_TAG, "No default vector set for: %s", setting->name);
         return false;
@@ -1133,6 +1143,23 @@ private:
                 return saveToDisk(m_pinsFileInfo);
             }
             break;
+            case BoardType::SR6PCB: {
+                PinMapSR6PCB* pinMap = PinMapSR6PCB::getInstance();
+                pinMap->overrideDefaults();
+                m_pinsFileInfo.initialized = true;
+                syncSR6AndCommonPinsToDisk(pinMap);
+                loadDefaultChannelsForDeviceType();
+                return saveToDisk(m_pinsFileInfo);
+            }
+            break;
+            case BoardType::SSR1PCB: {
+                PinMapSSR1PCB* pinMap = PinMapSSR1PCB::getInstance();
+                pinMap->overideDefaults();
+                m_pinsFileInfo.initialized = true;
+                syncSSR1AndCommonPinsToDisk(pinMap);
+                loadDefaultChannelsForDeviceType();
+                return saveToDisk(m_pinsFileInfo);
+            }
             default: {
                 bool ret = loadDefault(m_pinsFileInfo);
                 m_pinsFileInfo.initialized = true;
@@ -1469,6 +1496,7 @@ private:
         }
         int8_t pin = -1;
         int8_t channel = -1;
+        float coeff = 1.0f;
         getValue(VALVE_SERVO_PIN, pin);
         pinMap->setValve(pin);
         getValue(VALVE_SERVO_CHANNEL, channel);
@@ -1526,6 +1554,17 @@ private:
         {
             pinMap->setButtonSetPin(vec[i], i);
         }
+        getValue(SERVO_POWER_ENABLE_PIN, pin);
+        pinMap->setServoPowerEnable(pin);
+        getValue(SERVO_VOLTAGE_PIN, pin);
+        pinMap->setServoVoltage(pin);
+        getValue(BUS_VOLTAGE_PIN, pin);
+        pinMap->setBusVoltage(pin);
+        for (size_t i = 0; i < vec.size(); i++)
+        {
+            pinMap->setBrushedMotorDrive(vec[i], i);
+        }
+#define BRUSHED_DRIVE_PINS "Brushed_Drive_PIN"
 
         int timerFreq = -1;
 #if CONFIG_IDF_TARGET_ESP32
@@ -1676,6 +1715,11 @@ private:
         setValue(TEMP_PIN, pinMap->sleeveTemp());
         setValue(I2C_SDA_PIN, pinMap->i2cSda());
         setValue(I2C_SCL_PIN, pinMap->i2cScl());
+        setValue()
+#define SERVO_POWER_ENABLE_PIN "Servo_Power_Enable_PIN"
+#define SERVO_VOLTAGE_PIN "Servo_Voltage_Feedback_PIN"
+#define BUS_VOLTAGE_PIN "Bus_Voltage_Feedback_PIN"
+#define BRUSHED_DRIVE_PINS "Brushed_Drive_PIN"
 #if CONFIG_IDF_TARGET_ESP32
         setValue(ESP_H_TIMER0_FREQUENCY, pinMap->getTimerFrequency(0));
         setValue(ESP_H_TIMER1_FREQUENCY, pinMap->getTimerFrequency(1));
