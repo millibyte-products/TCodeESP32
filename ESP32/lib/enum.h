@@ -101,10 +101,11 @@ enum class ESPTimerChannelNum: int8_t {
     MAX
 };
 
-constexpr enum PDLevels : uint8_t {
+enum class PDLevels : int8_t {
     PD5V = 0,
     PD9V,
     PD12V,
     PD15V,
     PD20V,
+    PDDEFAULT = PD5V,
 };

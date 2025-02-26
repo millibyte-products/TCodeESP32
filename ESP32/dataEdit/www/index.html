@@ -13,6 +13,7 @@
 	<script defer type="text/javascript" src="utils-min.js"></script>
 	<script defer type="text/javascript" src="modal-component-min.js"></script>
 	<script defer type="text/javascript" src="battery-min.js"></script>
+	<script defer type="text/javascript" src="power-min.js"></script>
 	<script defer type="text/javascript" src="motion-generator-min.js"></script>
 	<script defer type="text/javascript" src="bldc-motor-min.js"></script>
 	<script defer type="text/javascript" src="buttons-min.js"></script>
@@ -1174,6 +1175,105 @@
 						Developed for a module 'CJMCU-294' That has a 'LTC2944' gas gauge chip on it.<br>
 						Other LTC2944 I2C modules with the address 0x64 may work.<br>
 					</span>
+				</div>
+				<div id="powerSettingsTable" class="formTable">
+					<div id="powerSettingsTableBody">
+						<div>
+							<div class="tHeader">
+								<h3>Power</h3>
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell">
+								<span>Power Delivery Level</span>
+							</div>
+							<div class="tRow">
+								<div class="tCell">
+									<span title="Choose the Power Delivery Voltage to request">PD Voltage</span>
+								</div>
+								<div class="tCell">
+									<select name="pdVoltage" id="pdVoltage" onchange="setPowerSettings()">
+										<option value="0">5V</option>
+										<option value="1">9V</option>
+										<option value="2">12V</option>
+										<option value="3">15V</option>
+										<option value="4">20V</opttion>
+									</select>
+								</div>
+							</div>
+							<div class="tRow">
+								<div class="tCell">
+									<span>Power Delivery Config Pins</span>
+								</div>
+							</div>
+							<div class="tRow">
+									<div class="tCell"><span title="PDCFG1 Pin">PD CFG1</span>
+									</div>
+									<div class="tCell">
+										<input id="PDCFG1_PIN" type="number" min="-1" max="2147483647" step="1" onclick="updatePins()">
+									</div>
+									<div class="tCell"><span title="PDCFG2 Pin">PD CFG2</span>
+									</div>
+									<div class="tCell">
+										<input id="PDCFG2_PIN" type="number" min="-1" max="2147483647" step="1" onclick="updatePins()">
+									</div>
+									<div class="tCell"><span title="PDCFG3 Pin">PD CFG3</span>
+									</div>
+									<div class="tCell">
+										<input id="PDCFG3_PIN" type="number" min="-1" max="2147483647" step="1" onclick="updatePins()">
+									</div>
+								
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell"><span title="Servo PSU Enable Pin">Servo power enable pin</span>
+							</div>
+							<div class="tCell">
+								<input id="Servo_Power_Enable_PIN" type="number" min="-1" max="2147483647" step="1" onclick="updatePins()">
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell"><span title="Servo Voltage Read Pin">Servo Voltage pin</span>
+							</div>
+							<div class="tCell">
+								<input id="Servo_Voltage_Feedback_PIN" type="number" min="-1" max="2147483647" step="1" onclick="updatePins()">
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell"><span>Servo Voltage Coefficient</span></div>
+							<div class="tCell">
+								<input id="servoVoltageCoefficient" type="number" min="0" step="0.10" max="2147483647" oninput="setPowerSettings()"
+									title="For display calculation only.">
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell"><span title="BUS Voltage Read Pin">BUS Voltage pin</span>
+							</div>
+							<div class="tCell">
+								<input id="Bus_Voltage_Feedback_PIN" type="number" min="-1" max="2147483647" step="1" onclick="updatePins()">
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell"><span>BUS Voltage Coefficient</span></div>
+							<div class="tCell">
+								<input id="busVoltageCoefficient" type="number" min="0" step="0.10" max="2147483647" oninput="setPowerSettings()"
+									title="For display calculation only.">
+							</div>
+						</div>
+				
+						<div class="tRow">
+							<div class="tCell"><span>BUS/Supply Voltage</span></div>
+							<div class="tCell">
+								<input id="busVoltage" type="text" readonly value="Unknown" />
+							</div>
+						</div>
+						<div class="tRow">
+							<div class="tCell"><span>Servo Voltage</span></div>
+							<div class="tCell">
+								<input id="servoVoltage" type="text" readonly value="Unknown" />
+							</div>
+						</div>
+					</div>
 				</div>
 				<div id="motionGeneratorSettingsTable" class="formTable v3Only">
 					<div id="motionGeneratorSettingsTableBody">

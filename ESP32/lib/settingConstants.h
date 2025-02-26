@@ -242,5 +242,7 @@
 #define ESP_L_TIMER3_FREQUENCY "ESP_L_TIMER3_FREQUENCY"
 
 #define PD_REQUESTED_VOLTAGE "pdRequestedVoltage"
+#define SERVO_VOLTAGE_COEFFICIENT "servoVoltageCoefficient"
+#define BUS_VOLTAGE_COEFFICIENT "busVoltageCoefficient"
 
 ;

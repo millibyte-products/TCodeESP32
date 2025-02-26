@@ -130,6 +130,12 @@ public:
     	LogHandler::verbose(_TAG, "setBatteryTemperature: %f", temperature);
 		m_batteryTemperature = temperature;
 	}
+	void setVoltageInformation(float vbus, float vservo) {
+		LogHandler::verbose(_TAG, "setVBUS: %f", vbus);
+		m_vbus = vbus;
+		LogHandler::verbose(_TAG, "setVServo: %f", vservo);
+		m_vservo = vservo;
+	}
 
 	void clearDisplay()
 	{
@@ -252,6 +258,9 @@ public:
 					is32() ? draw32Temp() : draw64Temp();
 				}
 #endif
+#if BUILD_PD
+				drawVoltages();
+#endif
 
 				display.display();
 			}
@@ -340,6 +349,10 @@ private:
 	float m_batteryVoltage = 0.0;
 	int m_batteryCapacityRemainingPercentage;
 	float m_batteryTemperature;
+
+	String m_VoltageStates = "VB?.? VS?.?";
+	float m_vservo;
+	float m_vbus;
 
 	Adafruit_SSD1306_RSB display;
 	bool m_animationPlaying = false;
@@ -527,6 +540,22 @@ private:
 				getTempString("", m_internalTempString, buf2, sizeof(buf2));
 				right(buf2, 2);
 			}
+		}
+	}
+
+	void drawVoltages() {
+		LogHandler::verbose(_TAG,"Enter drawVoltages");
+		char buf[16];
+		if (m_settingsFactory->getVersionDisplayed() || !hasNextLine()) {
+			LogHandler::verbose(_TAG, "versionDisplayed");
+			snprintf(buf, 16, "|VB %.1f VS %.1f|", m_vbus, m_vservo);
+			left(buf);
+			
+		} else {
+			snprintf(buf, 16, "VBUS: %.2f", m_vbus);
+			left(buf, 1);
+			snprintf(buf, 16, "VSERV: %.2f", m_vservo);
+			right(buf, 1);
 		}
 	}
 

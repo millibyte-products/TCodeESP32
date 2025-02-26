@@ -56,6 +56,9 @@ SOFTWARE. */
 #if BUILD_TEMP
 #include "TemperatureHandler.h"
 #endif
+#if BUILD_POWER
+#include "PowerHandler.h"
+#endif
 #if BUILD_DISPLAY
 #include "DisplayHandler.h"
 #endif
@@ -148,6 +151,10 @@ TaskHandle_t displayTask;
 #endif
 #if BUILD_TEMP
 TaskHandle_t temperatureTask;
+#endif
+#if BUILD_POWER
+PowerHandler *powerHandler;
+TaskHandle_t powerTask;
 #endif
 // This has issues running with the webserver.
 // OTAHandler otaHandler;
@@ -506,6 +513,25 @@ void batteryVoltageCallback(float capacityRemainingPercentage, float capacityRem
 	{
 		String statusJson("{\"batteryCapacityRemaining\":\"" + String(capacityRemaining) + "\", \"batteryCapacityRemainingPercentage\":\"" + String(capacityRemainingPercentage) + "\", \"batteryVoltage\":\"" + String(voltage) + "\", \"batteryTemperature\":\"" + String(temperature) + "\"}");
 		webSocketHandler->sendCommand("batteryStatus", statusJson.c_str());
+	}
+#endif
+}
+
+void startPowerConfig();
+
+void powerCallback(float vbus, float vservo)
+{
+#if BUILD_DISPLAY
+	if (displayHandler)
+	{
+		displayHandler->setVoltageInformation(vbus, vservo);
+	}
+#endif
+#if WIFI_TCODE
+	if (webSocketHandler)
+	{
+		String statusJson("{\"vbus\": " + String(vbus) + ", \"vservo\":" + String(vservo) + "}");
+		webSocketHandler->sendCommand("powerStatus", statusJson.c_str());
 	}
 #endif
 }
@@ -914,6 +940,29 @@ void setup()
 		// #endif
 	}
     LogHandler::debug(TagHandler::Main, "Display DRAM heaps free %u\n", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+#endif
+
+#if BUILD_POWER
+	powerHandler = new PowerHandler();
+	powerHandler->setup();
+        
+        powerHandler->setMessageCallback(powerCallback);
+        LogHandler::debug(TagHandler::Main, "Start power task");
+        auto powerStartStatus = xTaskCreatePinnedToCore(
+            PowerHandler::startLoop, /* Function to implement the task */
+            "PowerTask",                    /* Name of the task */
+            static_cast<uint16_t>(
+                configMINIMAL_STACK_SIZE *
+                2.5),           /* Stack size in words used to be 5000 */
+            powerHandler, /* Task input parameter */
+            1,                  /* Priority of the task */
+            &powerTask,   /* Task handle. */
+            APP_CPU_NUM);       /* Core where the task should run */
+        if (powerStartStatus != pdPASS) {
+            LogHandler::error(TagHandler::Main,
+                              "Could not start power task.");
+        }
+        LogHandler::debug(TagHandler::Main, "Power DRAM heaps free %u\n", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 #endif
 
 #if BLE_TCODE

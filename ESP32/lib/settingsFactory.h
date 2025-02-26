@@ -132,6 +132,9 @@ public:
     double getInternalTempForFanOn() const { return internalTempForFanOn; }
     bool getVibTimeoutEnabled() const { return vibTimeoutEnabled; }
     int getVibTimeout() const { return vibTimeout; }
+    PDLevels getPDRequestedVoltage() const { return powerDeliveryLevel; }
+    float getBusVoltageCoefficient() const { return busVoltageCoefficient; }
+    float getServoVoltageCoefficient() const { return servoVoltageCoefficient; }
 
     void setMessageCallback(SETTING_STATE_FUNCTION_PTR_T f)
     {
@@ -763,6 +766,20 @@ public:
             getValue(VIB_TIMEOUT_ENABLED, vibTimeoutEnabled);
             if(targeted) {initCommonMessages(name); return;}
         }
+        if(!name || !strcmp(name, PD_REQUESTED_VOLTAGE)) {
+            int8_t v;
+            getValue(PD_REQUESTED_VOLTAGE, v);
+            powerDeliveryLevel = (PDLevels)v;
+            if(targeted) {initCommonMessages(name); return;}
+        }
+        if(!name || !strcmp(name, BUS_VOLTAGE_COEFFICIENT)) {
+            getValue(BUS_VOLTAGE_COEFFICIENT, busVoltageCoefficient);
+            if(targeted) {initCommonMessages(name); return;}
+        }
+        if(!name || !strcmp(name, SERVO_VOLTAGE_COEFFICIENT)) {
+            getValue(SERVO_VOLTAGE_COEFFICIENT, servoVoltageCoefficient);
+            if(targeted) {initCommonMessages(name); return;}
+        }
         initCommonMessages();
     }
 
@@ -811,7 +828,7 @@ private:
     {
         false, COMMON_SETTINGS_PATH, SettingFile::Common, JsonDocument(), 
         {
-            {DEVICE_TYPE, "Type of device", "The surrent selected device", SettingType::Number, DEVICE_TYPE_DEFAULT, RestartRequired::YES, {SettingProfile::System}},
+            {DEVICE_TYPE, "Type of device", "The current selected device", SettingType::Number, DEVICE_TYPE_DEFAULT, RestartRequired::YES, {SettingProfile::System}},
             {MOTOR_TYPE_SETTING, "Motor type", "The current motor type", SettingType::Number, MOTOR_TYPE_DEFAULT, RestartRequired::YES, {SettingProfile::System}},
             {BOARD_TYPE_SETTING, "Board type", "The physical board type", SettingType::Number, BOARD_TYPE_DEFAULT, RestartRequired::YES, {SettingProfile::System}},
             {LOG_LEVEL_SETTING, "Log level", "The loglevel that will output", SettingType::Number, LOG_LEVEL_DEFAULT, RestartRequired::NO, {SettingProfile::System}},
@@ -884,7 +901,10 @@ private:
             {BOOT_BUTTON_ENABLED, "Boot button enabled", "Enables the boot button function", SettingType::Boolean, BOOT_BUTTON_ENABLED_DEFAULT, RestartRequired::YES, {SettingProfile::Button}},
             {BOOT_BUTTON_COMMAND, "Boot button command", "Command to execute when the boot button is pressed", SettingType::String, BOOT_BUTTON_COMMAND_DEFAULT, RestartRequired::NO, {SettingProfile::Button}},
             {BUTTON_SETS_ENABLED, "Button sets enabled", "Enables the button sets function", SettingType::Boolean, BUTTON_SETS_ENABLED_DEFAULT, RestartRequired::YES, {SettingProfile::Button}},
-            {BUTTON_ANALOG_DEBOUNCE, "Button debounce", "How long to debounce the button press in ms", SettingType::Number, BUTTON_ANALOG_DEBOUNCE_DEFAULT, RestartRequired::NO, {SettingProfile::Button}}
+            {BUTTON_ANALOG_DEBOUNCE, "Button debounce", "How long to debounce the button press in ms", SettingType::Number, BUTTON_ANALOG_DEBOUNCE_DEFAULT, RestartRequired::NO, {SettingProfile::Button}},
+            {PD_REQUESTED_VOLTAGE, "Power Delivery Voltage", "Voltage to request from power delivery source", SettingType::Number, PD_REQUESTED_VOLTAGE_DEFAULT, RestartRequired::NO, {SettingProfile::Power}},
+            {SERVO_VOLTAGE_COEFFICIENT, "Servo Voltage Coefficient", "Multiplier on raw servo voltage", SettingType::Number, SERVO_VOLTAGE_COEFFICIENT_DEFAULT, RestartRequired::NO, {SettingProfile::Power}},
+            {BUS_VOLTAGE_COEFFICIENT, "Bus Voltage Coefficient", "Multiplier on raw bus voltage", SettingType::Number, BUS_VOLTAGE_COEFFICIENT_DEFAULT, RestartRequired::NO, {SettingProfile::Power}},
         }
     };
 
@@ -932,10 +952,11 @@ private:
             {I2C_SDA_PIN, "I2C SDA PIN", "Pin of the I2C SDA", SettingType::Number, I2C_SDA_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::System, SettingProfile::Pin}},
             {I2C_SCL_PIN, "I2C SCL PIN", "Pin of the I2C SCL", SettingType::Number, I2C_SCL_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::System, SettingProfile::Pin}},
             {BUTTON_SET_PINS, "Button set pins", "Pins for each button set. (Max 4)", SettingType::ArrayInt, BUTTON_SET_PINS_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
+            {PD_CFG_PINS, "Power Delivery cfg pins", "Pins to configure PD Chip", SettingType::ArrayInt, PD_CFG_PINS_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
             {SERVO_POWER_ENABLE_PIN, "Servo power enable pin", "Enable power regulator for servo power", SettingType::Number, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
             {SERVO_VOLTAGE_PIN, "Servo_Voltage_Feedback_PIN", "Analog voltage feedback on the servo voltage",  SettingType::Number, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
             {BUS_VOLTAGE_PIN, "Bus_Voltage_Feedback_PIN", "Analog voltage feedback on input bus",  SettingType::Number, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
-            {BURSHED_DRIVE_PINS, "Brushed_Drive_PIN", "Brushed motor drive pins", SettingType::ArrayInt, SERVO_POWER_ENABLE_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
+            {BRUSHED_DRIVE_PINS, "Brushed_Drive_PIN", "Brushed motor drive pins", SettingType::ArrayInt, BRUSHED_MOTOR_DRIVE_DEFAULT, RestartRequired::YES, {SettingProfile::Pin, SettingProfile::Analog}},
             // BLDC
             {BLDC_ENCODER_PIN, "Encoder PIN", "Pin the BLDC encoder is on", SettingType::Number, BLDC_ENCODER_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Bldc, SettingProfile::Pin}},
             {BLDC_CHIPSELECT_PIN, "Chipselect PIN", "Pin the BLDC chip select is on", SettingType::Number, BLDC_CHIPSELECT_PIN_DEFAULT, RestartRequired::YES, {SettingProfile::Bldc, SettingProfile::Pin}},
@@ -1014,6 +1035,9 @@ private:
     int8_t voiceWakeTime;
     int vibTimeout;
     bool vibTimeoutEnabled;
+    PDLevels powerDeliveryLevel;
+    float servoVoltageCoefficient;
+    float busVoltageCoefficient;
 
     bool load(SettingFileInfo &fileInfo)
     {
@@ -1101,7 +1125,7 @@ private:
             loadCommonLiveCache(LOG_INCLUDETAGS);
             return true;
         } else if(!strcmp(setting->name, LOG_EXCLUDETAGS)) {
-            std::vector<const char*> excludesVec;`
+            std::vector<const char*> excludesVec;
             doc[LOG_EXCLUDETAGS] = excludesVec;
             loadCommonLiveCache(LOG_EXCLUDETAGS);
             return true;
@@ -1109,8 +1133,8 @@ private:
             std::vector<int8_t> vec = { BUTTON_SET_PINS_1, BUTTON_SET_PINS_2, BUTTON_SET_PINS_3, BUTTON_SET_PINS_4 };
             doc[BUTTON_SET_PINS] = vec;
             return true;
-        } else if (!strcmp(setting->name. PD_CFG_PINS)) {
-            std::vector<int8_t> vec = { PD_CFG1_PIN, PD_CFG2_PIN, PD_CFG3_PIN };
+        } else if (!strcmp(setting->name, PD_CFG_PINS)) {
+            std::vector<int8_t> vec = { PD_CFG_PIN_1, PD_CFG_PIN_2, PD_CFG_PIN_3 };
             doc[PD_CFG_PINS] = vec;
         } else if (!strcmp(setting->name, BRUSHED_DRIVE_PINS)) {
             std::vector<int8_t> vec = { BRUSHED_DRIVE_PIN_1, BRUSHED_DRIVE_PIN_2 };
@@ -1145,7 +1169,7 @@ private:
             break;
             case BoardType::SR6PCB: {
                 PinMapSR6PCB* pinMap = PinMapSR6PCB::getInstance();
-                pinMap->overrideDefaults();
+                pinMap->overideDefaults();
                 m_pinsFileInfo.initialized = true;
                 syncSR6AndCommonPinsToDisk(pinMap);
                 loadDefaultChannelsForDeviceType();
@@ -1560,10 +1584,19 @@ private:
         pinMap->setServoVoltage(pin);
         getValue(BUS_VOLTAGE_PIN, pin);
         pinMap->setBusVoltage(pin);
+        vec.clear();
+        getValueVector(BRUSHED_DRIVE_PINS, vec);
         for (size_t i = 0; i < vec.size(); i++)
         {
             pinMap->setBrushedMotorDrive(vec[i], i);
         }
+        vec.clear();
+        getValueVector(PD_CFG_PINS, vec);
+        for (size_t i = 0; i < vec.size(); ++i)
+        {
+            pinMap->setPDCFGPin(vec[i], i);
+        }
+
 #define BRUSHED_DRIVE_PINS "Brushed_Drive_PIN"
 
         int timerFreq = -1;
@@ -1715,11 +1748,9 @@ private:
         setValue(TEMP_PIN, pinMap->sleeveTemp());
         setValue(I2C_SDA_PIN, pinMap->i2cSda());
         setValue(I2C_SCL_PIN, pinMap->i2cScl());
-        setValue()
-#define SERVO_POWER_ENABLE_PIN "Servo_Power_Enable_PIN"
-#define SERVO_VOLTAGE_PIN "Servo_Voltage_Feedback_PIN"
-#define BUS_VOLTAGE_PIN "Bus_Voltage_Feedback_PIN"
-#define BRUSHED_DRIVE_PINS "Brushed_Drive_PIN"
+        setValue(SERVO_POWER_ENABLE_PIN, pinMap->servoPowerEnable());
+        setValue(SERVO_VOLTAGE_PIN, pinMap->servoVoltage());
+        setValue(BUS_VOLTAGE_PIN, pinMap->busVoltage());
 #if CONFIG_IDF_TARGET_ESP32
         setValue(ESP_H_TIMER0_FREQUENCY, pinMap->getTimerFrequency(0));
         setValue(ESP_H_TIMER1_FREQUENCY, pinMap->getTimerFrequency(1));

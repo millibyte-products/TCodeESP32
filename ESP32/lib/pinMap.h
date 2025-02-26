@@ -189,8 +189,8 @@ public:
     int8_t i2cScl() const { return m_i2cScl; }
     void setI2cScl(const int8_t &i2cScl) { m_i2cScl = i2cScl; }
 
-    int8_t pdCFG(const int8_t index) const { return m_pdCFG[index]; }
-    void setPdCFG(const int8_t pin, const int8_t index)  { 
+    int8_t PDCFGPin(const int8_t index) const { return m_pdCFG[index]; }
+    void setPDCFGPin(const int8_t pin, const int8_t index)  { 
         if (index >= MAX_PD_CFG_PINS) {
             LogHandler::error("Pin_map", "Invalid index for pd CFG pin %d", index);
             return;
@@ -199,7 +199,7 @@ public:
     }
 
     int8_t servoPowerEnable() const { return m_servoPowerEnable; }
-    void setServoPowerEnable(const in8_t pin) {
+    void setServoPowerEnable(const int8_t pin) {
         m_servoPowerEnable = pin;
     }
     int8_t busVoltage() const { return m_busVoltage; }
@@ -369,7 +369,7 @@ private:
     int8_t m_i2cScl = I2C_SCL_PIN_DEFAULT;
     int8_t m_buttonSetPins[MAX_BUTTON_SETS] = BUTTON_SET_PINS_DEFAULT;
     int8_t m_pdCFG[MAX_PD_CFG_PINS] = PD_CFG_PINS_DEFAULT;
-    int8_t m_servoPowerEnable = POWER_ENABLE_PIN_DEFAULT;
+    int8_t m_servoPowerEnable = SERVO_POWER_ENABLE_PIN_DEFAULT;
     int8_t m_busVoltage = BUS_VOLTAGE_PIN_DEFAULT;
     int8_t m_servoVoltage = SERVO_VOLTAGE_PIN_DEFAULT;
     float m_busVoltageCoefficient = BUS_VOLTAGE_COEFFICIENT_DEFAULT;
@@ -430,13 +430,13 @@ private:
 };
 
 class PinMapSSR1PCB : public PinMapSSR1 {
-    private:
-        PinMapSSR1PCB* getInstance() {
-            static PinMapSSR1PCB instance(DeviceType::SSR1, BoardType::MILLIBYTE);
+    public:
+        static PinMapSSR1PCB* getInstance() {
+            static PinMapSSR1PCB instance(DeviceType::SSR1, BoardType::SSR1PCB);
             return &instance;
         }
 
-        void overrideDefaults() override {
+        void overideDefaults() override {
             setEncoder(-1);
             setChipSelect(5);
             setEnable(4);
@@ -462,7 +462,7 @@ class PinMapSSR1PCB : public PinMapSSR1 {
         }
     protected:
     PinMapSSR1PCB(DeviceType deviceType, BoardType boardType) : PinMapSSR1(deviceType, boardType) {}
-}
+};
 
 class PinMapOSR : public PinMap {
 public:
@@ -562,9 +562,6 @@ private:
     int8_t m_rightUpperServoChannel = RIGHT_UPPER_SERVO_CHANNEL_DEFAULT;
     int8_t m_leftUpperServo = LEFT_UPPER_SERVO_PIN_DEFAULT;
     int8_t m_leftUpperServoChannel = LEFT_UPPER_SERVO_CHANNEL_DEFAULT;
-    int8_t m_pdCFG1 = PD_CFG1_PIN_DEFAULT;
-    int8_t m_pdCFG2 = PD_CFG2_PIN_DEFAULT;
-    int8_t m_pdCFG3 = PD_CFG3_PIN_DEFAULT;
     void overideDefaults() override {}
 };
 
@@ -637,15 +634,38 @@ class PinMapSR6PCB : public PinMapSR6 {
     public:
         static PinMapSR6PCB* getInstance()
         {
-            static PinMapSR6PCB instance(DeviceType::SR6, BoardType::MILLIBYTE);
+            static PinMapSR6PCB instance(DeviceType::SR6, BoardType::SR6PCB);
             return &instance;
         }
 
-        void overrideDefaults() override {
-            setPdCFGPin(27, 0);
-            setPdCFGPin(14, 1);
-            setPdCFGPin(12, 2);
-            setServoPowerEnablePin(13);
+        void overideDefaults() override {
+            setTwistFeedBack(15); // D15 || UIO2
+            setRightServo(23); // M0
+            setLeftServo(19); // M1
+            setRightUpperServo(18); // M2
+            setLeftUpperServo(5); // M3
+            setPitchLeft(17); // M4
+            setPitchRight(16); // M5
+            setValve(36); // M6
+            setTwist(39); // M7
+            // Common motor
+            setSqueeze(-1); //
+            setLubeButton(4); // D4 || UIO0
+            setInternalTemp(-1);
+            setSleeveTemp(-1);
+            setCaseFan(-1);
+            setVibe0(-1);
+            setVibe1(-1);
+            setVibe2(-1);
+            // // Vibe2_PIN = json["Vibe2_PIN"] | 23;
+            setVibe3(-1);
+            // // Vibe3_PIN = json["Vibe3_PIN"] | 32;
+            setHeater(-1);
+
+            setPDCFGPin(27, 0);
+            setPDCFGPin(14, 1);
+            setPDCFGPin(12, 2);
+            setServoPowerEnable(13);
             setBusVoltage(32);
             setBusVoltageCoefficient(0.2f);
             setServoVoltage(26);
@@ -653,4 +673,4 @@ class PinMapSR6PCB : public PinMapSR6 {
         }
     protected: 
         PinMapSR6PCB(DeviceType deviceType, BoardType boardType) : PinMapSR6(deviceType, boardType) {}
-}
+};
