@@ -274,6 +274,7 @@ void logCallBack(const char *input, size_t length, LogLevel level)
 	// 	webSocketHandler->sendDebug(in, level);
 	// }
 #endif
+	Serial.println(input);
 }
 #if BUILD_TEMP
 void tempChangeCallBack(TemperatureType type, const char *message, float temp)
@@ -707,7 +708,7 @@ void setup()
 	Serial.begin(115200);
     Serial.printf("Startup DRAM heaps free %u\n", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
-	LogHandler::setLogLevel(LogLevel::INFO);
+	LogHandler::setLogLevel(LogLevel::DEBUG);
 	LogHandler::setMessageCallback(logCallBack);
 
 	Serial.println();
@@ -943,7 +944,7 @@ void setup()
 #endif
 
 #if BUILD_POWER
-	powerHandler = new PowerHandler();
+	powerHandler = new PowerHandler(&Wire);
 	powerHandler->setup();
         
         powerHandler->setMessageCallback(powerCallback);

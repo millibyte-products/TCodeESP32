@@ -1087,17 +1087,17 @@ private:
     //     return true;
     // }
 
-    bool loadDefault(SettingFile file) 
+    bool loadDefault(SettingFile file)
     {
-        if(file == SettingFile::Network) 
+        if(file == SettingFile::Network)
         {
             return loadDefault(m_networkFileInfo);
         }
-        if(file == SettingFile::Common) 
+        if(file == SettingFile::Common)
         {
             return loadDefault(m_commonFileInfo);
         }
-        if(file == SettingFile::Pins) 
+        if(file == SettingFile::Pins)
         {
             return loadDefaultPins();
         }

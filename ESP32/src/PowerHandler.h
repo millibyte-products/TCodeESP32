@@ -31,13 +31,12 @@ SOFTWARE. */
 #include "TagHandler.h"
 #include "LogHandler.h"
 
-
 using POWER_STATE_FUNCTION_PTR_T = void (*)(float vbus, float vservo);
-/** Power Delivery configuration handler for CH224K
- */
+/** Power Delivery configuration handler for CH224K and MCP45HV31 */
 class PowerHandler {
         public:
-         PowerHandler() {
+         PowerHandler(TwoWire* i2c) {
+            _i2c = i2c;
             message_callback = nullptr;
          }
 
@@ -70,6 +69,34 @@ class PowerHandler {
             } else {
                 digitalWrite(m_vservo_enable_pin, LOW);
             }
+            if (_i2c)
+            {
+                _i2c->beginTransmission(MCP_ADDRESS);
+                _i2c->write((MCP_TCON_REGISTER << 4) | MCP_WRITE);
+                _i2c->write(0xFF);
+                _i2c->endTransmission();
+
+            }
+         }
+
+         void setServoVoltage(float requested_volts) {
+            // Calculate desired resistance value
+            // R1 is 47k
+            // R2 is 330 + 4.7k + DRES
+            // DRES is between 0 and 127 * 10k
+            // REQ ranges from 5k to 15k
+            // R2 = (57.38k) / (V - 1.221)
+            // VOUT = ((R1 * 1.221) / R2) - 1.221
+            // V = ((57.38) / R2) - 1.221
+            float resistance = 57380.0f / (requested_volts - 1.221f);
+            int n = (uint8_t)roundf((resistance - 5030.0f) / 127.0f);
+            if (n < 0) {
+                n = 0;
+            } else if (n > 127) {
+                n = 127;
+            }
+            writeServoResistance(n);
+
          }
 
          static void startLoop(void* parameter) {
@@ -166,6 +193,21 @@ class PowerHandler {
             digitalWrite(m_cfg_pins[2], values[2]);
          }
 
+         void writeServoResistance(uint8_t level) {
+            if (_i2c)
+            {
+                _i2c->beginTransmission(MCP_ADDRESS);
+                _i2c->write((MCP_WIPER_REGISTER << 4) | MCP_WRITE);
+                _i2c->write(level);
+                _i2c->endTransmission();
+            }
+         }
+
+        static const uint8_t MCP_ADDRESS = 0b00111100;
+        static const uint8_t MCP_WIPER_REGISTER = 0x00;
+        static const uint8_t MCP_TCON_REGISTER = 0x04;
+        static const uint8_t MCP_WRITE = 0x00;
+        static const uint8_t MCP_READ = 0x03;
          static const char* _TAG;
          unsigned long lastTick = 0;
          bool _isRunning;
@@ -180,6 +222,7 @@ class PowerHandler {
          int8_t m_vservo_enable_pin;
          std::vector<int> m_cfg_pins;
          POWER_STATE_FUNCTION_PTR_T message_callback;
+         TwoWire* _i2c;
      };
 
 const char* PowerHandler::_TAG = TagHandler::PowerHandler;
