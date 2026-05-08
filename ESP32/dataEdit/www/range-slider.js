@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -23,39 +23,116 @@ SOFTWARE. */
 // https://medium.com/@predragdavidovic10/native-dual-range-slider-html-css-javascript-91e778134816
 
 DeviceRangeSlider = {
+  channels: [],
+  minRange: 250,
+  sliderColor: "cornflowerblue",
+  rangeColor: "grey",
   setup() {
-    var channels = getChannelMap();
+    this.channels = getChannelMap();
     var deviceRangesTable = document.getElementById("deviceRangesTable");
     deleteAllChildren(deviceRangesTable);
-    for(var i = 0; i < channels.length; i++) {
-      var channel = channels[i];
-      if(!userSettings.sr6Mode && channel.sr6Only || channel.switch) {
+
+    var rangeContainer = document.createElement("div");
+    rangeContainer.classList.add("range_container");
+
+    var formControlFirst = document.createElement("div");
+    formControlFirst.classList.add("form_control");
+
+    var allEnabledContainer = document.createElement("div");
+    allEnabledContainer.classList.add("form_control_container_header");
+    var allEnabledLabel = document.createElement("label");
+    allEnabledLabel.setAttribute("for", "allEnabledCheckbox");
+    allEnabledLabel.innerText = "Toggle all";
+    allEnabledLabel.classList.add("range_container_header");
+    var allEnabledCheckbox = document.createElement("input");
+    allEnabledCheckbox.type = "checkbox";
+    allEnabledCheckbox.id = "allEnabledCheckbox";
+    allEnabledCheckbox.onclick = function (checkBox) {
+      let allRangeCheckboxes = document.getElementsByName("ChannelRangeEnabled");
+      for(var i = 0; i < allRangeCheckboxes.length; i++) {
+        allRangeCheckboxes[i].checked = checkBox.checked;
+        // this.channels[i].rangeLimitEnabled = checkBox.checked;
+        // channelsProfileSettings[i].rangeLimitEnabled = checkBox.checked;
+        this.toggleChannelEnabled(this.channels[i].name, checkBox.checked);
+      }
+      this.updateSettings(0);
+    }.bind(this, allEnabledCheckbox);
+
+
+    var tempEnabledContainer = document.createElement("div");
+    tempEnabledContainer.setAttribute("title", "This will temporarily toggle ALL ranges. This is always true on boot.")
+    tempEnabledContainer.classList.add("form_control_container");
+    var tempEnabledLabel = document.createElement("label");
+    tempEnabledLabel.setAttribute("for", "channelRangesEnabled");
+    tempEnabledLabel.innerText = "Enabled"
+    var tempEnabledCheck = document.createElement("input");
+    tempEnabledCheck.id = "channelRangesEnabled";
+    tempEnabledCheck.type = "checkbox"
+    tempEnabledCheck.onclick = function (checkBox) {
+      sendTCode(checkBox.checked ? "#channel-ranges-enable" : "#channel-ranges-disable");
+    }.bind(this, tempEnabledCheck);
+    tempEnabledCheck.checked = systemInfo["channelRangesEnabled"];
+
+    allEnabledContainer.appendChild(allEnabledCheckbox);
+    allEnabledContainer.appendChild(allEnabledLabel);
+    formControlFirst.appendChild(allEnabledContainer);
+    tempEnabledContainer.appendChild(tempEnabledLabel);
+    tempEnabledContainer.appendChild(tempEnabledCheck);
+    formControlFirst.appendChild(tempEnabledContainer);
+    rangeContainer.appendChild(formControlFirst);
+    deviceRangesTable.appendChild(rangeContainer);
+
+    for(var i = 0; i < this.channels.length; i++) {
+      var channel = this.channels[i];
+      if(!isSR6() && channel.sr6Only) {
           continue;
       }
-      var name = channel.channel;
-      var friendlyName = channel.channelName;
-      if(!userSettings["channelRanges"])
+      var name = channel.name;
+      var friendlyName = channel.friendlyName;
+      if(!channel)
         return;
 
-      var min = 1;
+      var min = 0;
       var max = getTCodeMax();
-      if(userSettings["channelRanges"][name]) {
-        max = userSettings["channelRanges"][name].max;
-        min = userSettings["channelRanges"][name].min;
-      }
+      max = channel.userMax;
+      min = channel.userMin;
 
+      //
       var sliderHeader = document.createElement("div");
-      sliderHeader.innerText = friendlyName;
       sliderHeader.classList.add("range_container_header");
+      var headerSpan = document.createElement("span");
+      var channelRangeEnabledChk = document.createElement("input");
+      channelRangeEnabledChk.id = name+"ChannelRangeEnabled";
+      channelRangeEnabledChk.setAttribute("name", "ChannelRangeEnabled");
+      channelRangeEnabledChk.type = "checkbox";
+      channelRangeEnabledChk.checked = channel.rangeLimitEnabled;
+      channelRangeEnabledChk.onclick = function (channel, checkBox) {
+        channel.rangeLimitEnabled = checkBox.checked;
+        this.toggleChannelEnabled(channel.name, checkBox.checked);
+        this.updateAllToggleChk();
+        this.updateSettings();
+      }.bind(this, channel, channelRangeEnabledChk);
+      var headerLabel = document.createElement("label");
+      headerLabel.innerText = friendlyName;
+      headerLabel.setAttribute("for", channelRangeEnabledChk.id);
+      headerSpan.appendChild(channelRangeEnabledChk);
+      headerSpan.appendChild(headerLabel);
+      sliderHeader.appendChild(headerSpan);
+
+      var formControlContainerHeader = document.createElement("div");
+      formControlContainerHeader.classList.add("form_control_container_header");
+      formControlContainerHeader.appendChild(sliderHeader);
+
       var sliderControl = document.createElement("div");
       sliderControl.classList.add("sliders_control");
 
       // Range slider inputs
       var minSlider = document.createElement("input");
       minSlider.id = "minSlider" + name;
+      minSlider.classList.add("fromSlider");
       minSlider.type = "range";
-      minSlider.min = 1;
-      minSlider.max = getTCodeMax();
+      minSlider.min = 0;
+      minSlider.max = getTCodeMax() - 1;
       minSlider.value = min;
       sliderControl.appendChild(minSlider);
       var maxSlider = document.createElement("input");
@@ -72,16 +149,17 @@ DeviceRangeSlider = {
       var formControlContainer = document.createElement("div");
       formControlContainer.classList.add("form_control_container");
 
-      var formControlContainerMin = document.createElement("div");
-      formControlContainerMin.classList.add("form_control_container__min");
+      var formControlContainerMin = document.createElement("label");
+      formControlContainerMin.classList.add("form_control_container_label");
       formControlContainerMin.innerText = "Min";
+      formControlContainerMin.setAttribute("for", "minInput" + name);
       formControlContainer.appendChild(formControlContainerMin);
 
       var minInput = document.createElement("input");
       minInput.id = "minInput" + name;
       minInput.type = "number";
-      minInput.min = 1;
-      minInput.max = getTCodeMax();
+      minInput.min = 0;
+      minInput.max = getTCodeMax() - 1;
       minInput.value = min;
       formControlContainer.appendChild(minInput);
       
@@ -90,9 +168,11 @@ DeviceRangeSlider = {
       formControlContainer2.classList.add("form_control_container");
       formControl.appendChild(formControlContainer2);
 
-      var formControlContainerMax = document.createElement("div");
-      formControlContainerMax.classList.add("form_control_container__max");
+
+      var formControlContainerMax = document.createElement("label");
+      formControlContainerMax.classList.add("form_control_container_label");
       formControlContainerMax.innerText = "Max";
+      formControlContainerMax.setAttribute("for", "maxInput" + name);
       formControlContainer2.appendChild(formControlContainerMax);
 
       var maxInput = document.createElement("input");
@@ -103,17 +183,18 @@ DeviceRangeSlider = {
       maxInput.value = max;
       formControlContainer2.appendChild(maxInput);
 
+      formControl.appendChild(formControlContainerHeader);
       formControl.appendChild(formControlContainer);
       formControl.appendChild(formControlContainer2);
 
       var rangeContainer = document.createElement("div");
       rangeContainer.classList.add("range_container");
-      rangeContainer.appendChild(sliderHeader);
-      rangeContainer.appendChild(sliderControl);
+      // rangeContainer.appendChild(sliderHeader);
       rangeContainer.appendChild(formControl);
+      rangeContainer.appendChild(sliderControl);
       deviceRangesTable.appendChild(rangeContainer);
 
-      this.fillSlider(minSlider, maxSlider, '#C6C6C6', '#25daa5', maxSlider);
+      this.fillSlider(minSlider, maxSlider, this.rangeColor, this.sliderColor, maxSlider);
       this.setToggleAccessible(maxSlider, maxSlider);
       
       // minSlider.oninput = () => controlMinSlider(minSlider, maxSlider, minInput, name);
@@ -137,6 +218,37 @@ DeviceRangeSlider = {
         this.controlMaxInput(minSlider, maxSlider, minInput, maxInput, maxSlider, name);
       }.bind(this, minSlider, maxSlider, minInput, maxInput, name);
     }
+    this.updateAllToggleChk();
+  },
+  updateSettings(debounce) {
+      updateUserSettings(debounce, EndPointType.ChannelProfiles.uri, channelsProfileSettings);
+  },
+  updateAllToggleChk() {
+    let anyEnabled = false;
+    let anyDisabled = false;
+
+    for(var i = 0; i < this.channels.length; i++) {
+      if(this.channels[i].rangeLimitEnabled) {
+        anyEnabled = true;
+      } else {
+        anyDisabled = true;
+      }
+    }
+
+    let allEnabledCheckbox = document.getElementById("allEnabledCheckbox");
+
+    if(anyDisabled && anyEnabled ) {
+      allEnabledCheckbox.indeterminate = true;
+    } else if(anyDisabled && !anyEnabled) {
+      allEnabledCheckbox.checked = false;
+      allEnabledCheckbox.indeterminate = false;
+    } else if(!anyDisabled && anyEnabled) {
+      allEnabledCheckbox.checked = true;
+      allEnabledCheckbox.indeterminate = false;
+    }
+  },
+  updateChannelRangesTemp(value) {
+    document.getElementById("channelRangesEnabled").checked = value;
   },
   show() {
     document.getElementById("deviceRangesModal").show();
@@ -160,74 +272,121 @@ DeviceRangeSlider = {
 
   controlMinInput(minSlider, maxSlider, minInput, maxInput, controlSlider, channelName) {
       const [min, max] = this.getParsed(minInput, maxInput);
-      this.fillSlider(minInput, maxInput, '#C6C6C6', '#25daa5', controlSlider);
-      maxInput.min = min;
-      minInput.max = max;
-      // if (min > max) {
-      //     minSlider.value = max;
-      //     minInput.value = max;
-      // } else {
-      //     minSlider.value = min;
+      var newValue = min + this.minRange;
+      if(newValue > getTCodeMax())
+      {
+        newValue = getTCodeMax() - this.minRange;
+      }
+      maxInput.min = newValue;
+      // maxInput.max = getTCodeMax();
+      // minSlider.value = min;
+      // if (min >= max) {
+      //   var newMax = min + this.minRange;
+      //   if(newMax > getTCodeMax()) {
+      //     newMax = getTCodeMax();
+      //     minInput.value = newMax - this.minRange;
+      //     minSlider.value = newMax - this.minRange;
+      //   } 
+      //   maxSlider.value = newMax;
+      //   maxInput.value = newMax;
       // }
-      if(minInput.checkValidity()) {
+      if(minInput.checkValidity() && maxInput.checkValidity()) {
           minSlider.value = minInput.value;
-          this.setChannelRange(channelName, minSlider.value, max);
-          sendTCode(channelName + minSlider.value + "S1000");
+          this.setChannelRange(channelName, parseInt(minInput.value), max);
+          this.fillSlider(minInput, maxInput, this.rangeColor, this.sliderColor, controlSlider);
+          sendTCodeValue(channelName, minSlider.value, TCodeModifierType.SPEED, 1000);
       }
   },
     
   controlMaxInput(minSlider, maxSlider, minInput, maxInput, controlSlider, channelName) {
       const [min, max] = this.getParsed(minInput, maxInput);
-      this.fillSlider(minInput, maxInput, '#C6C6C6', '#25daa5', controlSlider);
       this.setToggleAccessible(maxInput, maxSlider);
-      maxInput.min = min;
-      minInput.max = max;
-      // if (min <= max) {
-      //     maxSlider.value = max;
-      //     maxInput.value = max;
-      // } else {
-      //     maxInput.value = min;
+      var newValue = max - this.minRange;
+      if(newValue < getTCodeMin())
+      {
+        newValue = getTCodeMin() + this.minRange;
+      }
+      minInput.max = newValue;
+      // minInput.min = getTCodeMin();
+      // if (max <= min) {
+      //   var newMin = max - this.minRange;
+      //   if(newMin < getTCodeMin()) {
+      //     newMin = getTCodeMin();
+      //     maxInput.value = newMin + this.minRange;
+      //     maxSlider.value = newMin + this.minRange;
+      //   } 
+      //   minSlider.value = newMin;
+      //   minInput.value = newMin;
       // }
-      if(maxInput.checkValidity()) {
+      if(maxInput.checkValidity() && minInput.checkValidity()) {
           maxSlider.value = maxInput.value;
-          this.setChannelRange(channelName, min, maxInput.value);
-          sendTCode(channelName + maxInput.value + "S1000");
+          this.setChannelRange(channelName, min, parseInt(maxInput.value));
+          this.fillSlider(minInput, maxInput, this.rangeColor, this.sliderColor, controlSlider);
+          sendTCodeValue(channelName, maxInput.value, TCodeModifierType.SPEED, 1000);
       }
   },
 
   controlMinSlider(minSlider, maxSlider, minInput, maxInput, controlSlider, channelName) {
     const [min, max] = this.getParsed(minSlider, maxSlider);
-    this.fillSlider(minSlider, maxSlider, '#C6C6C6', '#25daa5', controlSlider);
-    if (min > max) {
-      minSlider.value = max;
-      minInput.value = max;
-    } else {
-      minInput.value = min;
-    }
-    this.setChannelRange(channelName, minInput.value, max);
-    sendTCode(channelName + minInput.value + "S1000");
+    this.fillSlider(minSlider, maxSlider, this.rangeColor, this.sliderColor, controlSlider);
+    minInput.value = min;
+    if (min >= max) {
+      var newMax = min + this.minRange;
+      if(newMax > getTCodeMax()) {
+        newMax = getTCodeMax();
+        minInput.value = newMax - this.minRange;
+        minSlider.value = newMax - this.minRange;
+      } 
+      maxSlider.value = newMax;
+      maxInput.value = newMax;
+    } 
+    this.setChannelRange(channelName, parseInt(minInput.value), max);
+    sendTCodeValue(channelName, minInput.value, TCodeModifierType.SPEED, 1000);
   },
 
   controlMaxSlider(minSlider, maxSlider, minInput, maxInput, controlSlider, channelName) {
     const [min, max] = this.getParsed(minSlider, maxSlider);
-    this.fillSlider(minSlider, maxSlider, '#C6C6C6', '#25daa5', controlSlider);
+    this.fillSlider(minSlider, maxSlider, this.rangeColor, this.sliderColor, controlSlider);
     this.setToggleAccessible(maxSlider, maxSlider);
-    if (min <= max) {
-      maxSlider.value = max;
-      maxInput.value = max;
-    } else {
-      maxInput.value = min;
-      maxSlider.value = min;
+    maxInput.value = max;
+    if (max <= min) {
+      var newMin = max - this.minRange;
+      if(newMin < getTCodeMin()) {
+        newMin = getTCodeMin();
+        maxInput.value = newMin + this.minRange;
+        maxSlider.value = newMin + this.minRange;
+      } 
+      minSlider.value = newMin;
+      minInput.value = newMin;
     }
-    this.setChannelRange(channelName, min, maxSlider.value);
-    sendTCode(channelName + maxSlider.value  + "S1000");
+    this.setChannelRange(channelName, min, parseInt(maxInput.value));
+    sendTCodeValue(channelName, maxInput.value, TCodeModifierType.SPEED, 1000);
   },
-
+  toggleChannelEnabled(channelName, enabled) {
+    for(var i=0; i<channelsProfileSettings["channelProfile"].length; i++)
+    {
+      var profile = channelsProfileSettings["channelProfile"][i];
+      if(profile["name"] == channelName)
+      {
+        profile.rangeLimitEnabled = enabled;
+        
+        break;
+      }
+    }
+  },
   setChannelRange(channelName, min, max) {
-      userSettings["channelRanges"][channelName].min = min;
-      userSettings["channelRanges"][channelName].max = max;
-      
-      updateUserSettings();
+    for(var i=0; i<channelsProfileSettings["channelProfile"].length; i++)
+    {
+      var profile = channelsProfileSettings["channelProfile"][i];
+      if(profile["name"] == channelName)
+      {
+        profile.userMin = min;
+        profile.userMax = max;
+        
+        this.updateSettings();
+        break;
+      }
+    }
   },
 
   getParsed(currentFrom, currentTo) {
@@ -237,17 +396,19 @@ DeviceRangeSlider = {
   },
 
   fillSlider(minSlider, maxSlider, sliderColor, rangeColor, controlSlider) {
-      const rangeDistance = maxSlider.max - maxSlider.min;
-      const minPosition = minSlider.value - maxSlider.min;
-      const maxPosition = maxSlider.value - maxSlider.min;
-      controlSlider.style.background = `linear-gradient(
-        max right,
+      const rangeDistance = maxSlider.max - minSlider.min;
+      const minPosition = minSlider.value;
+      const maxPosition = maxSlider.value
+      const background = `linear-gradient(
+        to right,
         ${sliderColor} 0%,
-        ${sliderColor} ${(minPosition)/(rangeDistance)*100}%,
+        ${sliderColor} ${((minPosition)/(rangeDistance))*100}%,
         ${rangeColor} ${((minPosition)/(rangeDistance))*100}%,
-        ${rangeColor} ${(maxPosition)/(rangeDistance)*100}%, 
-        ${sliderColor} ${(maxPosition)/(rangeDistance)*100}%, 
-        ${sliderColor} 100%)`;
+        ${rangeColor} ${((maxPosition)/(rangeDistance))*100}%, 
+        ${sliderColor} ${((maxPosition)/(rangeDistance))*100}%, 
+        ${sliderColor} 100%)`.replace(/[\n\r\t]/gm, "");
+      controlSlider.style.background = background;
+      // controlSlider.style.boxShadow = "-1px 1px 5px 0 #6495ed,1px -1px 5px 0 #add8e6,1px 1px 5px 0 #add8e6,-1px -1px 5px 0 #6495ed"
   },
 
   setToggleAccessible(currentTarget, maxSlider) {

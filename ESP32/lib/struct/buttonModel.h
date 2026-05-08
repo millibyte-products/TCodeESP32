@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,7 +24,7 @@ SOFTWARE. */
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include "../constants.h"
+#include "constants.h"
 
 struct ButtonModel {
     char name[26];

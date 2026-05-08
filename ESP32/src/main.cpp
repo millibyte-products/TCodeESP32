@@ -1,6 +1,6 @@
-/* MIT License
+﻿/* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,883 +20,469 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE. */
 
-#if DEBUG_BUILD
-    #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
-    #include "esp_log.h"
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#define ESP_ARDUINO3
 #endif
-#if BUILD_TYPE == RELEASE
 #include <Arduino.h>
+#include <EEPROM.h>
+
+#if PICO_BUILD
+// #include <FreeRTOS.h>
 #endif
 
 #include "utils.h"
-#include <SPIFFS.h>
-#include "LogHandler.h"
-#include "SettingsHandler.h"
-#include "SystemCommandHandler.h"
-#if WIFI_TCODE
-	#include "WifiHandler.h"
-#endif
-
-#if TEMP_ENABLED
-	#include "TemperatureHandler.h"
-#endif
-#if DISPLAY_ENABLED
-	#include "DisplayHandler.h"
-#endif
+#include <LittleFS.h>
+#include <TCode.h>
+#include "logging/LogHandler.h"
+#include "settings/SettingsHandler.h"
+#include "settings/FilesystemHandler.h"
+#include "settings/OperatingModeHandler.h"
+#include "messages/SystemCommandHandler.h"
+#include "serial/SerialHandler.h"
+#include "network/WifiHandler.h"
+#include "sensors/TemperatureHandler.h"
+#include "display/DisplayHandler.h"
 #if BLUETOOTH_TCODE
-	#include "BluetoothHandler.h"
+#include "bluetooth/BluetoothHandler.h"
 #endif
 #include "TCode/MotorHandler.h"
 
 #if MOTOR_TYPE == 0
-	#if TCODE_V2//Too much memory needed with debug
-		#include "TCode/v0.2/ServoHandler0_2.h"
-	#endif
-
-	#include "TCode/v0.3/ServoHandler0_3.h"
-	//#include "TCode/v1.0/ServoHandler1_0.h"
+#include "ServoHandler0_3.h"
+#include "ServoHandler0_4.h"
 #elif MOTOR_TYPE == 1
-	#include "TCode/v0.3/BLDCHandler0_3.h"
+#include "BLDCHandler0_3.h"
+#include "BLDCHandler0_4.h"
 #endif
 
-#if WIFI_TCODE
-	#include "UdpHandler.h"
-	//#include "TcpHandler.h"
-	#include "HTTP/HTTPBase.h"
-	#include "HTTP/WebSocketBase.h"
-	#if !SECURE_WEB
-		#include "WebHandler.h"
-	#else
-		#include "HTTP\HTTPSHandler.hpp"
-	#endif
-	#include "MDNSHandler.hpp"
+#include "network/UdpHandler.h"
+#include "network/HTTP/HTTPBase.h"
+#include "network/HTTP/WebSocketBase.h"
+#if !SECURE_WEB
+#include "network/WebHandler.h"
+#else
+#include "network/HTTP/HTTPSHandler.hpp"
 #endif
-//#include "OTAHandler.h"
-#if BLE_TCODE
-	#include "BLEHandler.hpp"
-#endif
+#include "network/MDNSHandler.hpp"
+// #include "OTAHandler.h"
+#include "bluetooth/BLE/BLEHandler.hpp"
+#include <esp_bt.h>
 
-#if WIFI_TCODE
-	#if !SECURE_WEB
-		#include "WebSocketHandler.h"
-	#else
-		#include "HTTP/SecureWebSocketHandler.hpp"
-	#endif
-#endif
+#include "network/WebSocketHandler.h"
+#include "tasks/TaskHandler.h"
 
-
-#include "BatteryHandler.h"
+#include "sensors/BatteryHandler.h"
+#include "PowerHandler.h"
 #include "Motion/MotionHandler.hpp"
-#include "VoiceHandler.hpp"
-#include "ButtonHandler.hpp"
+#include "sensors/VoiceHandler.hpp"
+#include "sensors/ButtonHandler.hpp"
 
-SystemCommandHandler* systemCommandHandler;
+TickType_t pxPreviousWakeTime = millis();
 
-//TcpHandler tcpHandler;
-MotorHandler* motorHandler;
-BatteryHandler* batteryHandler;
-TaskHandle_t batteryTask;
-TaskHandle_t httpsTask;
-
-MotionHandler motionHandler;
-VoiceHandler* voiceHandler;
-ButtonHandler* buttonHandler = 0;
-TaskHandle_t voiceTask;
-#if BLUETOOTH_TCODE
-	BluetoothHandler* btHandler = 0;
-#endif
-
-#if WIFI_TCODE
-	Udphandler* udpHandler = 0;
-	WifiHandler wifi;
-	MDNSHandler mdnsHandler;
-	HTTPBase* webHandler = 0;
-	WebSocketBase* webSocketHandler = 0;
-	
-#endif
-
-#if TEMP_ENABLED
-	TemperatureHandler* temperatureHandler = 0;
-#endif
-
-#if BLE_TCODE
-	BLEHandler* bleHandler = 0;
-#endif
-
-#if DISPLAY_ENABLED
-	DisplayHandler* displayHandler;
-	TaskHandle_t displayTask;
-	// #if ISAAC_NEWTONGUE_BUILD
-	// 	TaskHandle_t animationTask;
-	// #endif
-#endif
-#if TEMP_ENABLED
-	TaskHandle_t temperatureTask;
-#endif
 // This has issues running with the webserver.
-//OTAHandler otaHandler;
+// OTAHandler otaHandler;
 bool setupSucceeded = false;
 bool restarting = false;
+unsigned long restartAtMs = 0;
+bool networkingBringupAttempted = false;
+const unsigned long NETWORK_BRINGUP_DELAY_MS = 3000;
 
-String serialData;
-char commandTCodeData[MAX_COMMAND];
-char udpData[MAX_COMMAND];
-char webSocketData[MAX_COMMAND];
-#if BLE_TCODE
-	char bleData[MAX_COMMAND];
-#endif
-#if BLUETOOTH_TCODE
-	String bluetoothData;
-#endif
-char movement[MAX_COMMAND];
-ButtonModel* buttonCommand = 0;
-bool dStopped = false;
-bool tcodeV2Recieved = false;
+// =====================================================================
+// FreeRTOS task / thread layout
+// ---------------------------------------------------------------------
+// Core 0 (PRO_CPU)
+//   * "motor"           — pinned, prio MOTOR_TASK_PRIORITY (19), stack
+//                         MOTOR_TASK_STACK_SIZE. Owns motor setup() +
+//                         control loop. Drains motorCmdQueue each tick.
+//   * "servoWiggle"     — short-lived, spawned by identifyServo() to
+//                         pulse one servo for visual ID (see
+//                         MotorHandler0_3/0_4 and ServoHandler0_4).
+//
+// Core 1 (APP_CPU)
+//   * Arduino loop()    — cooperative poll() of every TaskHandler::Task
+//                         registered via TaskHandler::global().add().
+//                         Includes: SerialHandler, ButtonHandler,
+//                         WifiHandler, UdpHandler, BatteryHandler,
+//                         PowerHandler, OperatingModeHandler, WebHandler.
+//   * WiFi/IP/AsyncTCP  — internal SDK tasks created by Arduino-ESP32.
+//   * AsyncWebServer    — internal task created by ESPAsyncWebServer.
+//
+// Inter-core communication
+//   * motorCmdQueue     — xQueue used by feedMotorCommand() so any
+//                         core/task can submit a TCode command without
+//                         touching motor-state directly.
+// =====================================================================
 
-unsigned long bench[10];
-unsigned long benchLast[10];
-bool benchEnable = false;
-bool benchEnableZero = false;
-unsigned long benchThreshHold = 1300;
+// --- Motor task configuration ---
+// Motor control runs on a dedicated FreeRTOS task pinned to PRO_CPU (Core 0).
+// Priority must stay BELOW the WiFi/pp driver tasks (~23) so the WiFi stack
+// can process packets, handle WPA key rotation, and service TCP ACKs.
+// A priority of 19 still gives the motor task higher priority than most
+// application tasks while letting the WiFi stack preempt when needed.
+static const uint32_t MOTOR_TASK_STACK_SIZE = 16384;
+static const UBaseType_t MOTOR_TASK_PRIORITY = 19;
+static const BaseType_t MOTOR_TASK_CORE = PRO_CPU_NUM;
+static const uint32_t MOTOR_CMD_QUEUE_SIZE = 32;
+static const uint32_t MOTOR_CMD_MAX_LEN = 128;
 
-void benchStart(int benchNumber) {
-	if(benchEnable || (benchEnableZero && benchNumber == 0))
-		bench[benchNumber] = micros();
-}
-void benchFinish(const char* systemUnderBench, int benchNumber) {
-	if(benchEnable || (benchEnableZero && benchNumber == 0)) {
-		unsigned long timeTaken = micros() - bench[benchNumber];
-		if(timeTaken > benchThreshHold) {
-			Serial.printf("%s:							%lu\n", systemUnderBench, timeTaken);
-			bench[benchNumber] = 0;
-			benchLast[benchNumber] = timeTaken;
-		}
-	}
-}
+struct MotorCommand
+{
+	char data[MOTOR_CMD_MAX_LEN];
+	size_t len;
+};
+static QueueHandle_t motorCmdQueue = nullptr;
+static volatile bool motorSetupComplete = false;
 
-void displayPrint(String text) {
-	#if DISPLAY_ENABLED
-		displayHandler->println(text);
-	#endif
-}
+void displayPrint(const char *message);
+void startNetworking(bool apMode, int webPort, int udpPort, const char *hostname, const char *friendlyName);
+void ensureNetworkingAvailable();
 
+extern WifiHandler wifi;
 
-void TCodeCommandCallback(const char* in) {
-
-	if(systemCommandHandler->isCommand(in)) {
-		systemCommandHandler->process(in);
-	} else {
-		#if BLUETOOTH_TCODE
-			if (SettingsHandler::bluetoothEnabled && btHandler && btHandler->isConnected())
-				btHandler->CommandCallback(in);
-		#endif
-		#if BLE_TCODE
-
-		#endif
-		#if WIFI_TCODE
-			if(webSocketHandler)
-				webSocketHandler->CommandCallback(in);
-			if(udpHandler)
-				udpHandler->CommandCallback(in);
-		#endif
-		if(Serial)
-			Serial.println(in);
-	}
-}
-void TCodePassthroughCommandCallback(const char* in) {
-	if(systemCommandHandler->isCommand(in)) {
-		// This seems wrong but since we are only calling this from one place its fine for now.
-		char temp[strlen(in) +2];
-		temp[0] = {0};
-		strcpy(temp, in);
-		strcat(temp, "\n");
-		//////////////////////////////////////////////////////////////////////////////////////
-		#if BLUETOOTH_TCODE
-			if (SettingsHandler::bluetoothEnabled && btHandler && btHandler->isConnected())
-				btHandler->CommandCallback(temp);
-		#endif
-		#if BLE_TCODE
-
-		#endif
-		#if WIFI_TCODE
-			if(webSocketHandler)
-				webSocketHandler->CommandCallback(temp);
-			if(udpHandler)
-				udpHandler->CommandCallback(temp);
-		#endif
-		if(Serial)
-			Serial.println(temp);
-	}
-}
-void profileChangeCallback(uint8_t profile) {
-	
-}
-void logCallBack(const char* in, LogLevel level) {
-#if WIFI_TCODE
-	// if(webSocketHandler) {
-	// 	webSocketHandler->sendDebug(in, level);
-	// }
-#endif
-}
-#if TEMP_ENABLED
-void tempChangeCallBack(TemperatureType type, const char* message, float temp) {
-#if WIFI_TCODE
-	if(webSocketHandler) {
-		if (strpbrk(message, "{") == nullptr) {
-			webSocketHandler->sendCommand(message);
-		} else {
-			if(type == TemperatureType::SLEEVE) {
-				webSocketHandler->sendCommand("sleeveTempStatus", message);
-			} else {
-				webSocketHandler->sendCommand("internalTempStatus", message);
-			}
-		}
-	}
-#endif
-#if DISPLAY_ENABLED
-	if(displayHandler) {
-		if(type == TemperatureType::SLEEVE) {
-			displayHandler->setSleeveTemp(temp);
-		} else {
-			displayHandler->setInternalTemp(temp);
-		}
-	}
-#endif
-}
-void tempStateChangeCallBack(TemperatureType type, const char* state) {
-#if DISPLAY_ENABLED
-	if(displayHandler) {
-		if(type == TemperatureType::SLEEVE) {
-			LogHandler::verbose(TagHandler::Main, "tempStateChangeCallBack heat: %s", state);
-			displayHandler->setHeateState(state);
-			if(temperatureHandler)
-				displayHandler->setHeateStateShort(temperatureHandler->getShortSleeveControlStatus(state));
-		} else {
-			LogHandler::verbose(TagHandler::Main, "tempStateChangeCallBack fan: %s", state);
-			displayHandler->setFanState(state);
-		}
-	}
-#endif
-}
-#endif
-void startWeb(bool apMode) {
-#if WIFI_TCODE
-	if(!webHandler) {
-		displayPrint("Starting web server");
-		#if !SECURE_WEB
-			webHandler = new WebHandler();
-			webSocketHandler = new WebSocketHandler();
-		#else
-			webHandler = new HTTPSHandler();
-			webSocketHandler = new SecureWebSocketHandler();
-		#endif
-		webHandler->setup(SettingsHandler::webServerPort, webSocketHandler, apMode);
-		if(!apMode)
-		mdnsHandler.setup(SettingsHandler::hostname, SettingsHandler::friendlyName);
-		
-		#if SECURE_WEB
-			LogHandler::debug(TagHandler::Main, "Start https task");
-			auto httpsStatus = xTaskCreateUniversal(
-				HTTPSHandler::startLoop,/* Function to implement the task */
-				"HTTPSTask", /* Name of the task */
-				8192 * 3,  /* Stack size in words */
-				webHandler,  /* Task input parameter */
-				3,  /* Priority of the task */
-				&httpsTask,  /* Task handle. */
-				-1); /* Core where the task should run */
-			if(httpsStatus != pdPASS) {
-				LogHandler::error(TagHandler::Main, "Could not start https task.");
-			}
-		#endif
-	}
-#endif
-}
-
-
-#if BLE_TCODE
-void startBLE() {
-	if(!bleHandler) {
-		displayPrint("Starting BLE");
-		bleHandler = new BLEHandler();
-		bleHandler->setup();
-	}
-}
-#endif
-
-#if BLUETOOTH_TCODE
-void startBlueTooth() {
-	if(!btHandler) {
-		displayPrint("Starting Bluetooth serial");
-		btHandler = new BluetoothHandler();
-		btHandler->setup();
-	}
-}
-#endif
-
-void startUDP() {
-#if WIFI_TCODE
-	if(!udpHandler) {
-		displayPrint("Starting UDP");
-		udpHandler = new Udphandler();
-		udpHandler->setup(SettingsHandler::udpServerPort);
-	}
-#endif
-}
-
-void startConfigMode(bool withBle= true) {
+void startConfigMode(const int &webPort, const int &udpPort, const char *hostname, const char *friendlyName)
+{
 #if WIFI_TCODE
 	SettingsHandler::apMode = true;
-	LogHandler::info(TagHandler::Main, "Starting in APMode");
 	displayPrint("Starting in APMode");
-	if (wifi.startAp()) 
+
+	char pass[WIFI_PASS_LEN];
+	bool hidden = AP_MODE_HIDDEN_DEFAULT;
+	uint8_t channel = AP_MODE_CHANNEL_DEFAULT;
+
+	char subnet[IP_ADDRESS_LEN];
+	char gateway[IP_ADDRESS_LEN];
+	SettingsFactory *settingsFactory = SettingsFactory::getInstance();
+	settingsFactory->getValue(AP_MODE_PASS, pass, WIFI_PASS_LEN);
+	settingsFactory->getValue(AP_MODE_SUBNET, subnet, IP_ADDRESS_LEN);
+	settingsFactory->getValue(AP_MODE_GATEWAY, gateway, IP_ADDRESS_LEN);
+	settingsFactory->getValue(AP_MODE_HIDDEN, hidden);
+	settingsFactory->getValue(AP_MODE_CHANNEL, channel);
+	if (wifi.startAp(settingsFactory->getAPModeSSID(), pass, channel, hidden, settingsFactory->getAPModeIP(), subnet, gateway))
 	{
-		LogHandler::info(TagHandler::Main, "APMode started");
 		displayPrint("APMode started");
-		startWeb(true);
+		startNetworking(SettingsHandler::apMode, webPort, udpPort, hostname, friendlyName);
 	}
-	else 
+	else
 	{
-		LogHandler::error(TagHandler::Main, "APMode start failed");
 		displayPrint("APMode start failed");
 	}
 #endif
+}
 
-#if BLE_TCODE
-// After attempting to connect wifi, ble cause crash
-	if(withBle) { 
-		startBLE();
-	}
+// These go on the stack (always allocate all necessary memory)
+FilesystemHandler filesystemHandler;
+SerialHandler serialHandler;
+WifiHandler wifi;
+UdpHandler udpHandler;
+ButtonHandler buttonHandler;
+BatteryHandler batteryHandler;
+PowerHandler powerHandler;
+HTTPBase *webHandler = nullptr;
+WebSocketBase *webSocketHandler = nullptr;
+bool networkingStarted = false;
+
+// Motor handler - instantiated and initialized regardless of WiFi state
+#if MOTOR_TYPE == 0
+ServoHandler0_3 motorHandlerV03;
+ServoHandler0_4 motorHandlerV04;
+#elif MOTOR_TYPE == 1
+BLDCHandler0_3 motorHandlerV03;
+BLDCHandler0_4 motorHandlerV04;
 #endif
-}
+MotorHandler *motorHandler = nullptr;
 
-
-#if WIFI_TCODE
-void wifiStatusCallBack(WiFiStatus status, WiFiReason reason) {
-	if(status == WiFiStatus::CONNECTED) {
-        LogHandler::debug(TagHandler::Main, "wifiStatusCallBack WiFiStatus::CONNECTED");
-		if(reason == WiFiReason::AP_MODE) {
-        	LogHandler::debug(TagHandler::Main, "wifiStatusCallBack WiFiReason::AP_MODE");
-// #if BLUETOOTH_TCODE
-//             if(bleHandler)
-//               bleHandler->stop(); // If a client connects to the ap stop the BLE to save memory.
-// 			#endif
-// #endif
-		}
-	} else {
-		// wifi.dispose();
-		// startApMode();
-        LogHandler::debug(TagHandler::Main, "wifiStatusCallBack Not connected");
-		if(reason == WiFiReason::NO_AP || reason == WiFiReason::UNKNOWN) {
-        	LogHandler::debug(TagHandler::Main, "wifiStatusCallBack WiFiReason::NO_AP || WiFiReason::UNKNOWN");
-			startConfigMode(false);
-		} else if(reason == WiFiReason::AUTH) {
-        	LogHandler::debug(TagHandler::Main, "wifiStatusCallBack WiFiReason::AUTH");
-            LogHandler::warning(TagHandler::Main, "Connection auth failed: Resetting wifi password and restarting");
-            strcpy(SettingsHandler::wifiPass, SettingsHandler::defaultWifiPass);
-            SettingsHandler::saveSettings();
-            ESP.restart();
-		}  else if(reason == WiFiReason::AP_MODE) {
-        	LogHandler::debug(TagHandler::Main, "wifiStatusCallBack WiFiReason::AP_MODE");
-			// #if !ESP32_DA
-			// if(bleHandler)
-			// 	bleHandler->setup();
-			// #endif
-		}
-	}
-}
-#endif
-
-void batteryVoltageCallback(float capacityRemainingPercentage, float capacityRemaining, float voltage, float temperature) {
-	#if DISPLAY_ENABLED
-		if(displayHandler) {
-			displayHandler->setBatteryInformation(capacityRemainingPercentage, voltage, temperature);
-		}
-	#endif
-	#if WIFI_TCODE
-		if(webSocketHandler) {
-			String statusJson("{\"batteryCapacityRemaining\":\"" + String(capacityRemaining) + "\", \"batteryCapacityRemainingPercentage\":\"" + String(capacityRemainingPercentage) + "\", \"batteryVoltage\":\""+String(voltage)+"\", \"batteryTemperature\":\""+String(temperature)+"\"}");
-			webSocketHandler->sendCommand("batteryStatus", statusJson.c_str());
-		}
-	#endif
-}
-
-void settingChangeCallback(const char* group, const char* settingThatChanged) {
-    LogHandler::debug(TagHandler::Main, "settingChangeCallback: %s", settingThatChanged);
-	if(strcmp(group, "motionGenerator") == 0) {
-		if(strcmp(settingThatChanged, "motionSelectedProfileIndex") == 0 || strcmp(settingThatChanged, "motionProfile") == 0) 
-			motionHandler.setMotionChannels(SettingsHandler::getMotionChannels());
-		// else if(strcmp(settingThatChanged, "motionChannels") == 0) 
-		// 	motionHandler.setMotionChannels(SettingsHandler::getMotionChannels());
-		else if(strcmp(settingThatChanged, "motionEnabled") == 0) 
-			motionHandler.setEnabled(SettingsHandler::getMotionEnabled());
-		// else if(strcmp(settingThatChanged, "motionAmplitudeGlobal") == 0) 
-		// 	motionHandler.setAmplitude(SettingsHandler::getMotionAmplitudeGlobal());
-		// else if(strcmp(settingThatChanged, "motionOffsetGlobal") == 0) 
-		// 	motionHandler.setOffset(SettingsHandler::getMotionOffsetGlobal());
-		// else if(strcmp(settingThatChanged, "motionPeriodGlobal") == 0) 
-		// 	motionHandler.setPeriod(SettingsHandler::getMotionPeriodGlobal());
-		// else if(strcmp(settingThatChanged, "motionUpdateGlobal") == 0) 
-		// 	motionHandler.setUpdate(SettingsHandler::getMotionUpdateGlobal());
-		// else if(strcmp(settingThatChanged, "motionPhaseGlobal") == 0) 
-		// 	motionHandler.setPhase(SettingsHandler::getMotionPhaseGlobal());
-		// else if(strcmp(settingThatChanged, "motionReversedGlobal") == 0) 
-		// 	motionHandler.setReverse(SettingsHandler::getMotionReversedGlobal());
-		// else if(strcmp(settingThatChanged, "motionAmplitudeGlobalRandom") == 0) 
-		// 	motionHandler.setAmplitudeRandom(SettingsHandler::getMotionAmplitudeGlobalRandom());
-		// else if(strcmp(settingThatChanged, "motionAmplitudeGlobalRandomMin") == 0) 
-		// 	motionHandler.setAmplitudeRandomMin(SettingsHandler::getMotionAmplitudeGlobalRandomMin());
-		// else if(strcmp(settingThatChanged, "motionAmplitudeGlobalRandomMax") == 0) 
-		// 	motionHandler.setAmplitudeRandomMax(SettingsHandler::getMotionAmplitudeGlobalRandomMax());
-		// else if(strcmp(settingThatChanged, "motionPeriodGlobalRandom") == 0) 
-		// 	motionHandler.setPeriodRandom(SettingsHandler::getMotionPeriodGlobalRandom());
-		// else if(strcmp(settingThatChanged, "motionPeriodGlobalRandomMin") == 0) 
-		// 	motionHandler.setPeriodRandomMin(SettingsHandler::getMotionPeriodGlobalRandomMin());
-		// else if(strcmp(settingThatChanged, "motionPeriodGlobalRandomMax") == 0) 
-		// 	motionHandler.setPeriodRandomMax(SettingsHandler::getMotionPeriodGlobalRandomMax());
-		// else if(strcmp(settingThatChanged, "motionOffsetGlobalRandom") == 0) 
-		// 	motionHandler.setOffsetRandom(SettingsHandler::getMotionOffsetGlobalRandom());
-		// else if(strcmp(settingThatChanged, "motionOffsetGlobalRandomMin") == 0) 
-		// 	motionHandler.setOffsetRandomMin(SettingsHandler::getMotionOffsetGlobalRandomMin());
-		// else if(strcmp(settingThatChanged, "motionOffsetGlobalRandomMax") == 0) 
-		// 	motionHandler.setOffsetRandomMax(SettingsHandler::getMotionOffsetGlobalRandomMax());
-		// else if(strcmp(settingThatChanged, "motionRandomChangeMin") == 0) 
-		// 	motionHandler.setMotionRandomChangeMin(SettingsHandler::getMotionRandomChangeMin());
-		// else if(strcmp(settingThatChanged, "motionRandomChangeMax") == 0) 
-		// 	motionHandler.setMotionRandomChangeMax(SettingsHandler::getMotionRandomChangeMax());
-	} else if(voiceHandler && strcmp(group, "voiceHandler") == 0) {
-		if(strcmp(settingThatChanged, "voiceMuted") == 0) 
-			voiceHandler->setMuteMode(SettingsHandler::getVoiceMuted());
-		else if(strcmp(settingThatChanged, "voiceVolume") == 0) 
-			voiceHandler->setVolume(SettingsHandler::getVoiceVolume());
-		else if(strcmp(settingThatChanged, "voiceWakeTime") == 0) 
-			voiceHandler->setWakeTime(SettingsHandler::getVoiceWakeTime());
-	} else if(buttonHandler && strcmp(group, "buttonCommand") == 0) {
-		if(strcmp(settingThatChanged, "bootButtonCommand") == 0) 
-			buttonHandler->updateBootButtonCommand(SettingsHandler::bootButtonCommand);
-		else if(strcmp(settingThatChanged, "analogButtonCommands") == 0) {
-			buttonHandler->updateAnalogButtonCommands(SettingsHandler::buttonSets);
-		} else if(strcmp(settingThatChanged, "buttonAnalogDebounce") == 0) {
-			buttonHandler->updateAnalogDebounce(SettingsHandler::buttonAnalogDebounce);
-		}
-	} else if(strcmp(group, "channelRanges") == 0) {// TODO add channe; specific updates when moving to its own save...maybe...
-		motionHandler.updateChannelRanges();
-	}
-	
-	
-}
-void loadI2CModules() {
-#if DISPLAY_ENABLED
-	if(SettingsHandler::displayEnabled)
-	{
-    	LogHandler::debug(TagHandler::Main, "Start Display task");
-		auto displayStatus = xTaskCreatePinnedToCore(
-			DisplayHandler::startLoop,/* Function to implement the task */
-			"DisplayTask", /* Name of the task */
-			5000,  /* Stack size in words */
-			displayHandler,  /* Task input parameter */
-			1,  /* Priority of the task */
-			&displayTask,  /* Task handle. */
-			APP_CPU_NUM); /* Core where the task should run */
-			if(displayStatus != pdPASS) {
-    			LogHandler::error(TagHandler::Main, "Could not start display task.");
-			}
-	}
-#endif
-	if(SettingsHandler::batteryLevelEnabled) {
-		batteryHandler = new BatteryHandler();
-		if(batteryHandler->setup()) {
-			LogHandler::debug(TagHandler::Main, "Start Battery task");
-			auto batteryStatus = xTaskCreatePinnedToCore(
-				BatteryHandler::startLoop,/* Function to implement the task */
-				"BatteryTask", /* Name of the task */
-				4028,  /* Stack size in words */
-				batteryHandler,  /* Task input parameter */
-				1,  /* Priority of the task */
-				&batteryTask,  /* Task handle. */
-				APP_CPU_NUM); /* Core where the task should run */
-				if(batteryStatus != pdPASS) {
-					LogHandler::error(TagHandler::Main, "Could not start battery task.");
-				}
-				batteryHandler->setMessageCallback(batteryVoltageCallback);
-		}
-	}
-	if(SettingsHandler::getVoiceEnabled()) {
-		voiceHandler = new VoiceHandler();
-		voiceHandler->setMessageCallback(TCodeCommandCallback);
-		if(voiceHandler->setup()) {
-			LogHandler::debug(TagHandler::Main, "Start Voice task");
-			auto voiceStatus = xTaskCreatePinnedToCore(
-				VoiceHandler::startLoop,/* Function to implement the task */
-				"VoiceTask", /* Name of the task */
-				4028,  /* Stack size in words */
-				voiceHandler,  /* Task input parameter */
-				1,  /* Priority of the task */
-				&voiceTask,  /* Task handle. */
-				APP_CPU_NUM); /* Core where the task should run */
-				if(voiceStatus != pdPASS) {
-					LogHandler::error(TagHandler::Main, "Could not start voice task.");
-				}
-		}
-	}
-}
-void setup() 
+void displayPrint(const char *message)
 {
-	// see if we can use the onboard led for status
-	//https://github.com/kriswiner/ESP32/blob/master/PWM/ledcWrite_demo_ESP32.ino
-  	//digitalWrite(5, LOW);// Turn off on-board blue led
-
-
-	Serial.begin(115200);
-	
-    LogHandler::setLogLevel(LogLevel::INFO);
-	LogHandler::setMessageCallback(logCallBack);
-	#if WIFI_TCODE
-		wifi.setWiFiStatusCallback(wifiStatusCallBack);
-	#endif
-
-	uint32_t chipId = 0;
-	for(int i=0; i<17; i=i+8) {
-	  chipId |= ((ESP.getEfuseMac() >> (40 - i)) & 0xff) << i;
-	}
-	Serial.println();
-	LogHandler::info(TagHandler::Main, "ESP32 Chip model = %s Rev %d\n", ESP.getChipModel(), ESP.getChipRevision());
-	LogHandler::info(TagHandler::Main, "This chip has %d cores\n", ESP.getChipCores());
- 	LogHandler::info(TagHandler::Main, "Chip ID: %u\n", chipId);
-
-    // esp_log_level_set("*", ESP_LOG_VERBOSE);
-	// LogHandler::debug("main", "this is verbose");
-	// LogHandler::debug("main", "this is debug");
-	// LogHandler::info("main", "this is info");
-	// LogHandler::warning("main", "this is warning");
-	// LogHandler::error("main", "this is error");
-
-	if(!SPIFFS.begin(true))
+	if (message && message[0] != '\0')
 	{
-		LogHandler::error(TagHandler::Main, "An Error has occurred while mounting SPIFFS");
-		setupSucceeded = false;
+		Serial.println(message);
+		LogHandler::info(Tags::Main, "%s", message);
+	}
+}
+
+void startNetworking(bool apMode, int webPort, int udpPort, const char *hostname, const char *friendlyName)
+{
+	(void)udpPort;
+	(void)hostname;
+	(void)friendlyName;
+
+	if (networkingStarted)
+	{
 		return;
 	}
 
-	SettingsHandler::init();
-	LogHandler::info(TagHandler::Main, "Version: %s", SettingsHandler::getFirmwareVersion());
-
-	systemCommandHandler = new SystemCommandHandler();
-	systemCommandHandler->registerExternalCommandCallback(TCodePassthroughCommandCallback);
-
-#if MOTOR_TYPE == 0
-	if(SettingsHandler::TCodeVersionEnum == TCodeVersion::v0_3) {
-		motorHandler = new ServoHandler0_3();
-	}
-	#if !DEBUG_BUILD && TCODE_V2
-		else if(SettingsHandler::TCodeVersionEnum == TCodeVersion::v0_2)
-			motorHandler = new ServoHandler0_2();
-	#endif
-		else {
-			LogHandler::error(TagHandler::Main, "Invalid TCode version: %ld", SettingsHandler::TCodeVersionEnum);
-			return;// TODO: this stops apmode and not what we want
-			//motorHandler = new ServoHandler1_0();
-		}
-#elif MOTOR_TYPE == 1
-	motorHandler = new BLDCHandler0_3();
-#else
-	LogHandler::error(TagHandler::Main, "Invalid motor type defined!");
-	return;
-#endif
-
-	motorHandler->setMessageCallback(TCodeCommandCallback);
-	//SystemCommandHandler::registerOtherCommandCallback(TCodeCommandCallback);
-
-#if TEMP_ENABLED
-	if(SettingsHandler::tempSleeveEnabled || SettingsHandler::tempInternalEnabled) {
-		temperatureHandler = new TemperatureHandler();
-		temperatureHandler->setup();
-		temperatureHandler->setMessageCallback(tempChangeCallBack);
-		temperatureHandler->setStateChangeCallback(tempStateChangeCallBack);
-    	LogHandler::debug(TagHandler::Main, "Start temperature task");
-		auto tempStartStatus = xTaskCreatePinnedToCore(
-			TemperatureHandler::startLoop,/* Function to implement the task */
-			"TempTask", /* Name of the task */
-			5000,  /* Stack size in words */
-			temperatureHandler,  /* Task input parameter */
-			1,  /* Priority of the task */
-			&temperatureTask,  /* Task handle. */
-			APP_CPU_NUM); /* Core where the task should run */
-		if(tempStartStatus != pdPASS) {
-			LogHandler::error(TagHandler::Main, "Could not start temperature task.");
-		}
-	}
-	
-#endif
-#if DISPLAY_ENABLED
-	displayHandler = new DisplayHandler();
-	if(SettingsHandler::displayEnabled)
+	// Release Bluetooth controller memory if BLE is compiled in but not
+	// used.  This returns ~60 KB of contiguous internal DRAM to the heap,
+	// which is critical for the AsyncTCP task stack allocation under
+	// WiFi+BLE coexistence heap fragmentation.
+#if BLE_TCODE && !defined(BLE_ACTIVE)
+	esp_err_t btRel = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+	if (btRel == ESP_OK)
 	{
-		displayHandler->setup();
-		// #if ISAAC_NEWTONGUE_BUILD
-		// 	xTaskCreatePinnedToCore(
-		// 		DisplayHandler::startAnimationDontPanic,/* Function to implement the task */
-		// 		"DisplayTask", /* Name of the task */
-		// 		10000,  /* Stack size in words */
-		// 		displayHandler,  /* Task input parameter */
-		// 		25,  /* Priority of the task */
-		// 		&animationTask,  /* Task handle. */
-		// 		APP_CPU_NUM); /* Core where the task should run */
-		// #endif
+		LogHandler::info(Tags::Main, "Released BT controller memory (free heap: %u, max block: %u)",
+						 ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+	}
+	else
+	{
+		LogHandler::debug(Tags::Main, "BT mem release: %s (may already be released)", esp_err_to_name(btRel));
 	}
 #endif
 
-	
-	#if WIFI_TCODE
-		if (strcmp(SettingsHandler::wifiPass, SettingsHandler::defaultWifiPass) != 0 && SettingsHandler::ssid != nullptr) {
-			displayPrint("Setting up wifi...");
-			displayPrint("Connecting to: ");
-			displayPrint(SettingsHandler::ssid);
-			if (wifi.connect(SettingsHandler::ssid, SettingsHandler::wifiPass)) { 
-				displayPrint("Connected IP: " + wifi.ip().toString());
-		#if DISPLAY_ENABLED
-			displayHandler->setLocalIPAddress(wifi.ip());
-		#endif
-				startUDP();
-				startWeb(false);
-			} 
-		} else {
-			startConfigMode();
-		}
-	#endif
-	#if BLUETOOTH_TCODE
-		if(!SettingsHandler::apMode && SettingsHandler::bluetoothEnabled) {
-			startBlueTooth();
-		} 
-	#endif
-    //otaHandler.setup();
-	displayPrint("Setting up motor");
-    motorHandler->setup();
-	motionHandler.setup(SettingsHandler::TCodeVersionEnum);
-	loadI2CModules();
-	
-	if(SettingsHandler::bootButtonEnabled || SettingsHandler::buttonSetsEnabled) {
-		buttonHandler = new ButtonHandler();
-		buttonHandler->init(SettingsHandler::buttonAnalogDebounce, SettingsHandler::bootButtonCommand, SettingsHandler::buttonSets);
-	}
-
-	SettingsHandler::setMessageCallback(settingChangeCallback);
-	setupSucceeded = true;
-    LogHandler::debug(TagHandler::Main, "Setup finished");
-    SettingsHandler::printFree();
-}
-
-// Main loop functions/////////////////////////////////////////////////
-void readTCode(String& tcode) {
-	if(SettingsHandler::TCodeVersionEnum == TCodeVersion::v0_2)
-		tcodeV2Recieved = true;
-	if(motorHandler) {
-		motorHandler->read(tcode);
-		tcode.clear();
-	}
-}
-
-void readTCode(char* tcode) {
-	if(SettingsHandler::TCodeVersionEnum == TCodeVersion::v0_2)
-		tcodeV2Recieved = true;
-	if(motorHandler) {
-		motorHandler->read(tcode);
-		tcode[0] = {0};
-	}
-}
-
-void processButton() {
-	if(buttonHandler) {
-		buttonHandler->read(buttonCommand);
-		if(buttonCommand) {
-			char command[MAX_COMMAND];
-			systemCommandHandler->process(buttonCommand, command);
-			if(strlen(command) > 0) {
-				readTCode(command);
-			}
-		}
-	}
-}
-
-void getTCodeInput() {
-	if(Serial.available() > 0) {
-		serialData = Serial.readStringUntil('\n');
-	} else if(serialData.length()) {
-		serialData.clear();
-	}
-	if(systemCommandHandler) {
-		systemCommandHandler->getTCode(commandTCodeData);
-	}
-#if BLUETOOTH_TCODE
-	if (btHandler && btHandler->isConnected() && btHandler->available() > 0) {
-		bluetoothData = btHandler->readStringUntil('\n');
-	}
+	if (!webHandler)
+	{
+#if !SECURE_WEB
+		webHandler = new WebHandler();
+		webSocketHandler = new WebSocketHandler();
+#else
+		webHandler = new HTTPSHandler();
+		webSocketHandler = new SecureWebSocketHandler();
 #endif
+	}
+
+	if (webHandler && webSocketHandler)
+	{
+		webHandler->setup_http(webPort, webSocketHandler, apMode);
+		networkingStarted = true;
+		LogHandler::info(Tags::Main, "Configuration interfaces started on port %d (%s mode)", webPort, apMode ? "AP" : "STA");
+	}
+}
+
+void ensureNetworkingAvailable()
+{
 #if WIFI_TCODE
-	if(webSocketHandler) {
-		benchStart(1);
-		webSocketHandler->getTCode(webSocketData);
-		benchFinish("Websocket get", 1);
-	}
-	if(udpHandler) {
-		benchStart(2);
-		udpHandler->read(udpData);
-		benchFinish("Udp get", 2);
-	}
-#endif
-#if BLE_TCODE
-	if(bleHandler) {
-		bleHandler->read(bleData);
-	}
-#endif
-}
+	SettingsFactory *settingsFactory = SettingsFactory::getInstance();
+	const int webPort = settingsFactory->getWebServerPort();
+	const int udpPort = settingsFactory->getUdpServerPort();
+	const char *hostname = settingsFactory->getHostname();
+	const char *friendlyName = settingsFactory->getFriendlyName();
 
-void processCommand() {
-	// Read and process tcode $ and # commands
-	if(serialData.length() > 0) {
-		if(systemCommandHandler && systemCommandHandler->isCommand(serialData.c_str())) {
-			//systemCommandHandler->process(serialData.c_str());
-			readTCode(serialData);
-		}
-	}
-#if BLUETOOTH_TCODE
-	if(bluetoothData.length() > 0) {
-		if(systemCommandHandler && systemCommandHandler->isCommand(bluetoothData.c_str())) {
-			//systemCommandHandler->process(bluetoothData.c_str());
-			executeTCode(bluetoothData);
-		}
-	}
-#endif
-#if WIFI_TCODE
-	else if(strlen(udpData) > 0 && systemCommandHandler && systemCommandHandler->isCommand(udpData)) {
-		//systemCommandHandler->process(udpData);
-		readTCode(udpData);
-	}
-	else if(strlen(webSocketData) > 0 && systemCommandHandler && systemCommandHandler->isCommand(webSocketData)) {
-		//systemCommandHandler->process(webSocketData);
-		readTCode(webSocketData);
-	}
-#endif
-}
+	char ssid[SSID_LEN] = {0};
+	char pass[WIFI_PASS_LEN] = {0};
+	settingsFactory->getValue(SSID_SETTING, ssid, sizeof(ssid));
+	settingsFactory->getValue(WIFI_PASS_SETTING, pass, sizeof(pass));
 
-void processMotionHandlerMovement() {
-	motionHandler.getMovement(movement);
-	if(strlen(movement) > 0) {
-		LogHandler::verbose(TagHandler::MainLoop, "motion handler writing: %s", movement);
-		readTCode(movement);
+	bool connectedToSta = false;
+	if (strlen(ssid) > 0 && strcmp(ssid, SSID_DEFAULT) != 0)
+	{
+		displayPrint("Attempting WiFi STA connection");
+		connectedToSta = wifi.connect(ssid, pass);
 	}
-}
 
-void loop() {
-	// if(setupSucceeded && SettingsHandler::saving) {
-	// 	motorHandler->execute();
-	// 	vTaskDelay(250/portTICK_PERIOD_MS);
-	// 	return;
-	// }
-	//LogHandler::verbose(TagHandler::MainLoop, "Enter loop ############################################");
-	tcodeV2Recieved = false;
-	benchStart(0);
-	if (SettingsHandler::restartRequired || restarting) {  // check the flag here to determine if a restart is required
-		if(!restarting) {
-			LogHandler::info(TagHandler::Main, "Restarting ESP");
-			ESP.restart();
-        	restarting = true;
-		}
-        vTaskDelay(1000/portTICK_PERIOD_MS);
-	} 
-#if TEMP_ENABLED
-	else if (SettingsHandler::tempInternalEnabled && temperatureHandler && temperatureHandler->isMaxTempTriggered()) {
-		char stop[7] = "DSTOP\n";
-		readTCode(stop);
-		LogHandler::error(TagHandler::Main, "Internal temp has reached maximum user set. Main loop disabled! Restart system to enable the loop.");
-			if(SettingsHandler::fanControlEnabled) {
-				temperatureHandler->setFanState();
-			}
-        vTaskDelay(5000/portTICK_PERIOD_MS);
-	} 
-#endif
-	else {
-		if(setupSucceeded)
+	if (connectedToSta)
+	{
+		SettingsHandler::apMode = false;
+		String staIp = wifi.ip().toString();
+		LogHandler::info(Tags::Main, "WiFi connected, IP Address: %s", staIp.c_str());
+		String staMsg = "WiFi connected: " + staIp;
+		displayPrint(staMsg.c_str());
+		startNetworking(false, webPort, udpPort, hostname, friendlyName);
+		return;
+	}
+
+	displayPrint("Starting AP configuration mode");
+	startConfigMode(webPort, udpPort, hostname, friendlyName);
+	if (WifiHandler::apMode())
+	{
+		String apIp = WiFi.softAPIP().toString();
+		LogHandler::info(Tags::Main, "Captive portal active, AP IP Address: %s", apIp.c_str());
+		String apMsg = "Captive portal IP: " + apIp;
+		displayPrint(apMsg.c_str());
+	}
+
+	if (!WifiHandler::apMode())
+	{
+		LogHandler::warning(Tags::Main, "Primary AP startup failed, retrying with defaults");
+		if (wifi.startAp(AP_MODE_SSID_DEFAULT, AP_MODE_PASS_DEFAULT, AP_MODE_CHANNEL_DEFAULT, AP_MODE_HIDDEN_DEFAULT, AP_MODE_IP_DEFAULT, AP_MODE_SUBNET_DEFAULT, AP_MODE_GATEWAY_DEFAULT))
 		{
-			//otaHandler.handle();
-
-			getTCodeInput();// Must be executed first!
-			
-			processButton();
-
-			processCommand();
-
-			if(!SettingsHandler::motionPaused) {
-				dStopped = false;
-				benchStart(3);
-				if (SettingsHandler::getMotionEnabled()) {// Motion overrides all other input
-					processMotionHandlerMovement();
-				} else if (strlen(commandTCodeData) > 0) {
-					LogHandler::verbose(TagHandler::MainLoop, "system command tcode writing: %s", commandTCodeData);
-					readTCode(commandTCodeData);
-				} else if (serialData.length() > 0) {
-					LogHandler::verbose(TagHandler::MainLoop, "serial writing: %s", serialData.c_str());
-					readTCode(serialData);
-				} else if (strlen(webSocketData) > 0) {
-					LogHandler::verbose(TagHandler::MainLoop, "webSocket writing: %s", webSocketData);
-					readTCode(webSocketData);
-				} else if (!SettingsHandler::apMode && strlen(udpData) > 0) {
-					benchStart(6);
-					LogHandler::verbose(TagHandler::MainLoop, "udp writing: %s", udpData);
-					readTCode(udpData);
-					benchFinish("Udp write", 6);
-				} 
-#if BLE_TCODE
-				else if (strlen(bleData) > 0) {
-					readTCode(bleData);
-				}
-#endif
-#if BLUETOOTH_TCODE
-				else if (!SettingsHandler::getMotionEnabled() && bluetoothData.length() > 0) {
-					LogHandler::verbose(TagHandler::MainLoop, "bluetooth writing: %s", bluetoothData);
-					readTCode(bluetoothData);
-				}
-#endif
-				benchFinish("Input check", 3);
-			} else if(!dStopped) {//All motion is paused execute stop.
-				// movement[0] = {0};
-				// udpData[0] = {0};
-				// webSocketData[0] = {0};
-				// serialData.clear();
-				char stop[7] = "DSTOP\n";
-				readTCode(stop);
-				dStopped = true;
-				tcodeV2Recieved = false;
-#if BLE_TCODE
-				//bleData = {0};
-#endif
-#if BLUETOOTH_TCODE
-				//bluetoothData.clear();
-#endif
-			}
-
-			benchStart(4);
-			if(motorHandler)
-				motorHandler->execute();
-			benchFinish("Execute", 4);
-
-#if TEMP_ENABLED
-			benchStart(5);
-			if(temperatureHandler && temperatureHandler->isRunning()) {
-				if(SettingsHandler::tempSleeveEnabled) {
-					temperatureHandler->setHeaterState();
-				}
-				if(SettingsHandler::fanControlEnabled) {
-					temperatureHandler->setFanState();
-				}
-			}
-			benchFinish("Temp check", 5);
-#endif
+			SettingsHandler::apMode = true;
+			String apIp = WiFi.softAPIP().toString();
+			LogHandler::info(Tags::Main, "Captive portal active, AP IP Address: %s", apIp.c_str());
+			String apMsg = "Captive portal IP: " + apIp;
+			displayPrint(apMsg.c_str());
+			startNetworking(true, webPort, udpPort, hostname, friendlyName);
 		}
 	}
-	if(!setupSucceeded) {
-		LogHandler::error(TagHandler::Main, "There was an issue in setup");
-        vTaskDelay(5000/portTICK_PERIOD_MS);
+#endif
+}
+
+// Dedicated motor control task â€“ runs on PRO_CPU so it is never blocked
+// by WiFi / networking / web-server work that lives on APP_CPU.
+static void motorTaskFunc(void *param)
+{
+	MotorHandler *handler = static_cast<MotorHandler *>(param);
+	LogHandler::info(Tags::Main, "Motor task starting on core %d", xPortGetCoreID());
+
+	// Run motor hardware setup on this core (sensor, driver, FOC init)
+	handler->setup();
+	motorSetupComplete = true;
+	LogHandler::info(Tags::Main, "Motor setup complete on core %d, entering control loop", xPortGetCoreID());
+
+	MotorCommand cmd;
+	for (;;)
+	{
+		// Service any pending hot-reattach (#reapply-pwm) before draining
+		// the command queue so re-attached pins immediately accept writes.
+		handler->serviceReapply();
+
+		// Drain any queued TCode commands before each control cycle
+		while (xQueueReceive(motorCmdQueue, &cmd, 0) == pdTRUE)
+		{
+			handler->read(cmd.data, cmd.len);
+		}
+
+		// Execute motor control (sensor read â†’ FOC â†’ move)
+		handler->execute();
+
+		// Yield for 1 tick (~1 ms) so the IDLE task can feed the watchdog
+		// and lower-priority tasks on this core can run.
+		vTaskDelay(1);
 	}
-	
-	benchFinish("Main loop", 0);
+}
+
+// Thread-safe: enqueue a TCode command for the motor task.
+// Called from serial / network handlers on any core.
+void feedMotorCommand(const char *cmd, size_t len)
+{
+	if (!motorCmdQueue || !cmd || len == 0)
+		return;
+
+	MotorCommand motorCmd;
+	size_t copyLen = (len < MOTOR_CMD_MAX_LEN - 1) ? len : (MOTOR_CMD_MAX_LEN - 1);
+	memcpy(motorCmd.data, cmd, copyLen);
+	motorCmd.data[copyLen] = '\0';
+	motorCmd.len = copyLen;
+
+	// Non-blocking send â€“ if the queue is full the command is dropped.
+	xQueueSend(motorCmdQueue, &motorCmd, 0);
+}
+
+void setup()
+{
+	Serial.begin(115200);
+	Serial.println("BOOT: setup entered");
+	Serial.println();
+	LogHandler::setLogLevel(LogLevel::INFO);
+	LogHandler::info(Tags::Main, "Firmware version: %s", FIRMWARE_VERSION_NAME);
+	uint32_t chipId = 0;
+	for (int i = 0; i < 17; i = i + 8)
+	{
+		chipId |= ((ESP.getEfuseMac() >> (40 - i)) & 0xff) << i;
+	}
+	LogHandler::info(Tags::Main, "ESP32 Chip model = %s Rev %d", ESP.getChipModel(), ESP.getChipRevision());
+	LogHandler::info(Tags::Main, "This chip has %d cores", ESP.getChipCores());
+	LogHandler::info(Tags::Main, "Chip ID: %u", chipId);
+	Serial.println();
+
+	Serial.println("BOOT: FilesystemHandler::init");
+	FilesystemHandler::init();
+	Serial.println("BOOT: SettingsHandler::init");
+	SettingsHandler::init();
+
+	SettingsFactory *settingsFactory = SettingsFactory::getInstance();
+	const TCodeVersion tcodeVersion = settingsFactory->getTcodeVersion();
+#if MOTOR_TYPE == 0
+	motorHandler = (tcodeVersion == TCodeVersion::v0_3) ? static_cast<MotorHandler *>(&motorHandlerV03) : static_cast<MotorHandler *>(&motorHandlerV04);
+#elif MOTOR_TYPE == 1
+	motorHandler = (tcodeVersion == TCodeVersion::v0_3) ? static_cast<MotorHandler *>(&motorHandlerV03) : static_cast<MotorHandler *>(&motorHandlerV04);
+#endif
+	MotorHandler::setActive(motorHandler);
+	LogHandler::info(Tags::Main, "Selected motor handler for TCode version: %s", settingsFactory->getTcodeVersionString());
+
+	Serial.println("BOOT: SerialHandler::init");
+	SerialHandler::init();
+
+	TaskHandler::Manager &taskManager = TaskHandler::global();
+	Serial.println("BOOT: Registering tasks");
+	LogHandler::info(Tags::Main, "Initializing tasks");
+	taskManager.add(&serialHandler); // Serial TCode ingress
+	LogHandler::info(Tags::Main, "Serial handler initialized");
+	taskManager.add(&buttonHandler); // Button input
+	LogHandler::info(Tags::Main, "Button handler initialized");
+	taskManager.add(&wifi); // Network connection state machine
+	LogHandler::info(Tags::Main, "WiFi handler initialized");
+	taskManager.add(&udpHandler); // TCode ingress/egress transport
+	LogHandler::info(Tags::Main, "UDP handler initialized");
+	taskManager.add(&batteryHandler); // Telemetry polling
+	LogHandler::info(Tags::Main, "Battery handler initialized");
+	taskManager.add(&powerHandler); // Analog rail telemetry polling
+	LogHandler::info(Tags::Main, "Power handler initialized");
+
+	batteryHandler.setMessageCallback([](const float& capacityRemainingPercentage, const float& capacityRemaining, const float& voltage, const float& temperature)
+		{
+			if (!webSocketHandler)
+				return;
+			char payload[256] = { 0 };
+			snprintf(payload, sizeof(payload), "{\"batteryCapacityRemainingPercentage\":%.2f,\"batteryCapacityRemaining\":%.2f,\"batteryVoltage\":%.3f,\"batteryTemperature\":%.2f}",
+				capacityRemainingPercentage, capacityRemaining, voltage, temperature);
+			webSocketHandler->sendCommand("batteryStatus", payload);
+		});
+	powerHandler.setMessageCallback([](const char* payload)
+		{
+			if (!webSocketHandler || !payload)
+				return;
+			webSocketHandler->sendCommand("powerStatus", payload);
+		});
+	// Handles advanced fuctions (motor, ota, wifi, etc)
+	Serial.println("BOOT: OperatingModeHandler::init");
+	OperatingModeHandler::init();
+	LogHandler::info(Tags::Main, "Operating mode handler initialized");
+
+	// Create the command queue used by feedMotorCommand() from any core
+	motorCmdQueue = xQueueCreate(MOTOR_CMD_QUEUE_SIZE, sizeof(MotorCommand));
+
+	// Launch motor control on a dedicated FreeRTOS task pinned to PRO_CPU.
+	// Motor setup() + execute() both run on that core so there is zero
+	// contention with WiFi / networking work on APP_CPU.
+	Serial.println("BOOT: Starting motor task on PRO_CPU");
+	if (motorHandler)
+	{
+		BaseType_t rc = xTaskCreatePinnedToCore(
+			motorTaskFunc,
+			"motor",
+			MOTOR_TASK_STACK_SIZE,
+			motorHandler,
+			MOTOR_TASK_PRIORITY,
+			nullptr,
+			MOTOR_TASK_CORE);
+		if (rc != pdPASS)
+		{
+			LogHandler::error(Tags::Main, "Failed to create motor task!");
+		}
+	}
+	else
+	{
+		LogHandler::error(Tags::Main, "Motor handler not initialized â€“ skipping motor task");
+	}
+
+	LogHandler::info(Tags::Main, "Tasks registered");
+	Serial.println("BOOT: setup complete");
+}
+
+void loop()
+{
+	// Cooperatively poll all communication / sensor tasks on APP_CPU (Core 1).
+	// Motor control runs on its own FreeRTOS task (PRO_CPU) â€“ nothing to do here.
+	TaskHandler::global().tasks().poll();
+
+	if (!networkingBringupAttempted && millis() >= NETWORK_BRINGUP_DELAY_MS)
+	{
+		networkingBringupAttempted = true;
+		Serial.println("BOOT: network bring-up");
+		ensureNetworkingAvailable();
+	}
+
+	if (SettingsHandler::restartRequired >= 0 && !restarting)
+	{
+		restarting = true;
+		restartAtMs = millis() + (static_cast<unsigned long>(SettingsHandler::restartRequired) * 1000UL);
+		LogHandler::info(Tags::Main, "Restart scheduled in %d second(s)", SettingsHandler::restartRequired);
+	}
+
+	if (restarting && millis() >= restartAtMs)
+	{
+		LogHandler::info(Tags::Main, "Restarting now");
+		delay(50);
+		ESP.restart();
+	}
 }

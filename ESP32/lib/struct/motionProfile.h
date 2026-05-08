@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,16 +25,16 @@ SOFTWARE. */
 #include <ArduinoJson.h>
 #include "motionChannel.h"
 
-#define maxMotionProfileCount 5
-#define maxMotionProfileNameLength 31
-#define motionDefaultProfileName "Profile"
+#define MAX_MOTION_PROFILE_COUNT 5
+#define MAX_MOTION_PROFILE_NAME_LENGTH 31
+#define MOTION_PROFILE_DEFAULT_NAME "Profile"
 
 struct MotionProfile {
     MotionProfile() { }
     MotionProfile(int profileNumber) {
-        snprintf(motionProfileName, sizeof(motionProfileName), "Profile %ld", profileNumber);
+        snprintf(motionProfileName, sizeof(motionProfileName), "Profile %d", profileNumber);
     }
-    char motionProfileName[maxMotionProfileNameLength] = motionDefaultProfileName;
+    char motionProfileName[MAX_MOTION_PROFILE_NAME_LENGTH] = MOTION_PROFILE_DEFAULT_NAME;
     bool edited = false;
     std::vector<MotionChannel> channels;
 
@@ -59,7 +59,7 @@ struct MotionProfile {
     void toJson(JsonObject &obj) {
         obj["name"] = motionProfileName;
         obj["edited"] = edited;
-        auto array = obj.createNestedArray("channels");
+        auto array = obj["channels"].to<JsonArray>();
         for(size_t i = 0; i<channels.size(); i++) {
             JsonObject channelObj;
             channels[i].toJson(channelObj);

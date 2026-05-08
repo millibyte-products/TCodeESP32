@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,37 +25,39 @@ SOFTWARE. */
 #include <ArduinoJson.h>
 #include "enum.h"
 #include "struct/channel.h"
-
+#include "constants.h"
+#define BLDC_V3_CHANNEL_COUNT 10
+#define SERVO_V3_CHANNEL_COUNT 14
 class ChannelMap {
 public:
-    const Channel Stroke = {Name: "L0", FriendlyName: "Stroke", isSwitch: false, sr6Only: false};
-    const Channel Surge = {Name: "L1", FriendlyName: "Surge", isSwitch: false, sr6Only: true};
-    const Channel Sway = {Name: "L2", FriendlyName: "Sway", isSwitch: false, sr6Only: true};
-    const Channel Twist = {Name: "R0", FriendlyName: "Twist", isSwitch: false, sr6Only: false};
-    const Channel Roll = {Name: "R1", FriendlyName: "Roll", isSwitch: false, sr6Only: false};
-    const Channel Pitch = {Name: "R2", FriendlyName: "Pitch", isSwitch: false, sr6Only: false};
-    const Channel Vibe1 = {Name: "V0", FriendlyName: "Vibe 1", isSwitch: true, sr6Only: false};
-    const Channel Vibe2 = {Name: "V1", FriendlyName: "Vibe 2", isSwitch: true, sr6Only: false};
-    const Channel Vibe3 = {Name: "V2", FriendlyName: "Vibe 3", isSwitch: true, sr6Only: false};
-    const Channel Vibe4 = {Name: "V3", FriendlyName: "Vibe 4", isSwitch: true, sr6Only: false};
-    const Channel SuckManual = {Name: "A0", FriendlyName: "Suck manual", isSwitch: false, sr6Only: false};
-    const Channel SuckLevel = {Name: "A1", FriendlyName: "Suck level", isSwitch: false, sr6Only: false};
-    const Channel Lube = {Name: "A2", FriendlyName: "Lube", isSwitch: true, sr6Only: false};
-    const Channel Squeeze = {Name: "A3", FriendlyName: "Squeeze", isSwitch: false, sr6Only: false};
+    const Channel Stroke = {"L0", "Stroke", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Surge = {"L1", "Surge", false, true, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Sway = {"L2", "Sway", false, true, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Twist = {"R0", "Twist", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Roll = {"R1", "Roll", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Pitch = {"R2", "Pitch", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Vibe1 = {"V0", "Vibe 1", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX, TCODE_MIN, TCODE_MIN, TCODE_MAX};
+    const Channel Vibe2 = {"V1", "Vibe 2", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX, TCODE_MIN, TCODE_MIN, TCODE_MAX};
+    const Channel Vibe3 = {"V2", "Vibe 3", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX, TCODE_MIN, TCODE_MIN, TCODE_MAX};
+    const Channel Vibe4 = {"V3", "Vibe 4", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX, TCODE_MIN, TCODE_MIN, TCODE_MAX};
+    const Channel SuckManual = {"A0", "Suck manual", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel SuckLevel = {"A1", "Suck level", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
+    const Channel Lube = {"A2", "Lube", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX, TCODE_MIN, TCODE_MIN, TCODE_MAX};
+    const Channel Squeeze = {"A3", "Aux3", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX, TCODE_MIN, TCODE_MID, TCODE_MAX};
 
-    Channel ChannelListV2[9] = {
-        Stroke,
-        Surge,
-        Sway,
-        {Name: "L3", FriendlyName: "Suck", isSwitch: false, sr6Only: false},
-        Twist,
-        Roll,
-        Pitch,
-        {Name: "V0", FriendlyName: "Vibe 0", isSwitch: true, sr6Only: false},
-        {Name: "V1", FriendlyName: "Vibe 1/Lube", isSwitch: true, sr6Only: false}
-    };
+    // Channel ChannelListV2[9] = {
+    //     Stroke,
+    //     Surge,
+    //     Sway,
+    //     {"L3", "Suck", false, false, TCODE_MIN, TCODE_MID, TCODE_MAX},
+    //     Twist,
+    //     Roll,
+    //     Pitch,
+    //     {"V0", "Vibe 0", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX},
+    //     {"V1", "Vibe 1/Lube", true, false, TCODE_MIN, TCODE_MIN, TCODE_MAX}
+    // };
 
-    Channel ChannelListV3[14] = {
+    Channel ChannelListV3[SERVO_V3_CHANNEL_COUNT] = {
         Stroke,
         Surge,
         Sway,
@@ -72,7 +74,7 @@ public:
         Squeeze
     };
 
-    Channel ChannelListBLDCV3[10] = {
+    Channel ChannelListBLDCV3[BLDC_V3_CHANNEL_COUNT] = {
         Stroke,
         Twist,
         Vibe1,
@@ -85,9 +87,10 @@ public:
         Squeeze
     };
 
-    void init(const TCodeVersion version, const MotorType motorType) {
+    void init(const TCodeVersion version, const MotorType motorType, const DeviceType deviceType) {
         m_version = version;
         m_motorType = motorType;
+        m_deviceType = deviceType;
         setChannelLimits();
     }
 
@@ -98,6 +101,44 @@ public:
             return;
         }
         serializeServo(arr);
+    }
+
+    uint8_t count() {
+        switch(m_motorType)
+        {
+            case MotorType::BLDC:
+            return BLDC_V3_CHANNEL_COUNT;
+            default:
+            return SERVO_V3_CHANNEL_COUNT;
+        }
+    }
+
+    Channel* get() {
+        switch(m_motorType)
+        {
+            case MotorType::BLDC:
+            return ChannelListBLDCV3;
+            default:
+            return ChannelListV3;
+        }
+    }
+    
+    Channel* get(uint8_t index) {
+        if(index > count())
+        {
+            return nullptr;
+        }
+        Channel* currentChannels = get();
+        return &currentChannels[index];
+    }
+
+    Channel* get(const char* name) {
+        Channel* currentChannels = get();
+        for (size_t i = 0; i < count(); i++) {
+            if(strcmp(currentChannels[i].Name, name) == 0)
+                return &currentChannels[i];
+        }
+        return nullptr;
     }
 
     void tCodeHome(char buf[MAX_COMMAND], uint16_t speed = 1000) {
@@ -112,14 +153,14 @@ public:
             return;
         }
         switch (m_version) {
-            case TCodeVersion::v0_2:
-                for(auto channel : ChannelListV2) {
-                    char bufTemp[MAX_COMMAND];
-                    formatTCodeChannel(channel, bufTemp, channel.isSwitch ? channel.min : channel.mid, speed);
-                    strcat(buf, bufTemp);
-                    strcat(buf, " ");
-                }
-                break;
+            // case TCodeVersion::v0_2:
+            //     for(auto channel : ChannelListV2) {
+            //         char bufTemp[MAX_COMMAND];
+            //         formatTCodeChannel(channel, bufTemp, channel.isSwitch ? channel.min : channel.mid, speed);
+            //         strcat(buf, bufTemp);
+            //         strcat(buf, " ");
+            //     }
+            //     break;
             case TCodeVersion::v0_3:
                 for(auto channel : ChannelListV3) {
                     char bufTemp[MAX_COMMAND];
@@ -128,7 +169,7 @@ public:
                     strcat(buf, " ");
                 }
                 break;
-            case TCodeVersion::v0_5:// Not supported yet
+            case TCodeVersion::v0_4:// Not supported yet
                 //v5ToJson(arr);
                 break;
         }
@@ -137,6 +178,7 @@ public:
 private:
     TCodeVersion m_version;
     MotorType m_motorType;
+    DeviceType m_deviceType;
 
     // void v2ToJson(JsonArray& arr) {
     //     for (Channel channel : ChannelListV2) {
@@ -156,24 +198,26 @@ private:
     //         channel.toJson(obj);
     //     }
     // }
+    
     void formatTCodeChannel(const Channel& channel, char* buf, int value, int speed = -1) {
         if(value < 0) {
             value = channel.isSwitch ? channel.min : channel.mid;
         }
-        char valueString[5];
-        sprintf(valueString, m_version == TCodeVersion::v0_2 ? "%03d" : "%04d", value);
+        char valueString[11];
+        sprintf(valueString, "%04d", value);
         if(speed < 1) {
             sprintf(buf, "%s%s", channel.Name, valueString);
             return;
         }
-        sprintf(buf, "%s%sS%ld", channel.Name, valueString, speed);
+        sprintf(buf, "%s%sS%d", channel.Name, valueString, speed);
     }
+
     void setChannelLimits() {
-        for (Channel &channel : ChannelListV2) {
-            channel.min = 0;
-            channel.mid = 500;
-            channel.max = 999;
-        }
+        // for (Channel &channel : ChannelListV2) {
+        //     channel.min = 0;
+        //     channel.mid = 500;
+        //     channel.max = 999;
+        // }
         for (Channel &channel : ChannelListV3) {
             channel.min = 0;
             channel.mid = 5000;
@@ -188,13 +232,13 @@ private:
 
     void serializeBLDC(JsonArray& arr) {
         switch (m_version) {
-            case TCodeVersion::v0_2:// Not supported in BLDC
-                break;
+            // case TCodeVersion::v0_2:// Not supported in BLDC
+            //     break;
             case TCodeVersion::v0_3:
                 //v3ToJson(arr);
                 toJson(ChannelListBLDCV3, arr, sizeof(ChannelListBLDCV3)/sizeof(Channel));
                 break;
-            case TCodeVersion::v0_5:// Not supported yet
+            case TCodeVersion::v0_4:// Not supported yet
                 //v5ToJson(arr);
                 break;
         }
@@ -202,14 +246,14 @@ private:
     
     void serializeServo(JsonArray& arr) {
         switch (m_version) {
-            case TCodeVersion::v0_2:
-                toJson(ChannelListV2, arr, sizeof(ChannelListV2)/sizeof(Channel));
-                break;
+            // case TCodeVersion::v0_2:
+            //     toJson(ChannelListV2, arr, sizeof(ChannelListV2)/sizeof(Channel));
+            //     break;
             case TCodeVersion::v0_3:
                 //v3ToJson(arr);
                 toJson(ChannelListV3, arr, sizeof(ChannelListV3)/sizeof(Channel));
                 break;
-            case TCodeVersion::v0_5:// Not supported yet
+            case TCodeVersion::v0_4:// Not supported yet
                 //v5ToJson(arr);
                 break;
         }
@@ -218,7 +262,9 @@ private:
     void toJson(const Channel channels[], JsonArray& arr, uint16_t len) {
         for (int i=0; i < len; i++) {
             auto channel = channels[i];
-            auto obj = arr.createNestedObject();
+            if(m_deviceType != DeviceType::SR6 && channel.sr6Only)
+                continue;
+            auto obj = arr.add<JsonObject>();
             channel.toJson(obj);
         }
     }

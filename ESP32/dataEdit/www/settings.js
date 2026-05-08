@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22,71 +22,128 @@ SOFTWARE. */
 
 var userSettings = {};
 var wifiSettings = {};
+var pinoutSettings = {};
 var systemInfo = {};
 var motionProviderSettings = {};
 var buttonSettings = {};
-var upDateTimeout;
+var channelsProfileSettings = {};
+var debounceTimeouts = {};
 var restartRequired = false;
 var documentLoaded = false;
 var debugEnabled = true;
 var playSounds = false;
+
+// Pin-setting keys whose changes are hot-swappable: the firmware reapplies
+// these via MotorHandler::reapplyPwm() (called automatically after each
+// pinout save, see postPinoutSettings -> requestReapplyPwm). They do NOT
+// trigger the "restart required" indicator.
+const PWM_HOTSWAP_PIN_FIELDS = new Set([
+    "RightServo_PIN", "LeftServo_PIN",
+    "RightUpperServo_PIN", "LeftUpperServo_PIN",
+    "PitchLeftServo_PIN", "PitchRightServo_PIN",
+    "ValveServo_PIN", "TwistServo_PIN", "Squeeze_PIN",
+    "Vibe0_PIN", "Vibe1_PIN", "Vibe2_PIN", "Vibe3_PIN",
+    "LubeButton_PIN",
+    "RightServo_CHANNEL", "LeftServo_CHANNEL",
+    "RightUpperServo_CHANNEL", "LeftUpperServo_CHANNEL",
+    "PitchLeftServo_CHANNEL", "PitchRightServo_CHANNEL",
+    "ValveServo_CHANNEL", "TwistServo_CHANNEL", "Squeeze_CHANNEL",
+    "Vibe0_CHANNEL", "Vibe1_CHANNEL", "Vibe2_CHANNEL", "Vibe3_CHANNEL"
+]);
+
+// Snapshot of pinoutSettings as last persisted by the firmware. Used to
+// diff which pin keys actually changed when the user edits a value, so we
+// only set the "restart required" indicator for pins the firmware can NOT
+// hot-swap (BLDC, I2C, voltage monitors, temp, button-set, twist feedback,
+// display, heater, fan).
+var lastPinoutSnapshot = {};
 var importSettingsInputElement;
 var websocket;
 const EndPointType = {
     System: { uri: "/systemInfo"},
+    DebugInfo: { uri: "/debugInfo"},
     Common: {uri: "/settings"},
+    Pins: {uri: "/pins"},
     Wifi: {uri: "/wifiSettings"},
     MotionProfile: {uri: "/motionProfiles"},
-    Buttons: {uri: "/buttonSettings"}
+    Buttons: {uri: "/buttonSettings"},
+    ChannelProfiles: {uri: "/channelsProfile"},
+    Ping: {uri: "/ping"},
 }
 const TCodeVersion = {
-    V2: 0,
-    V3: 1
+    V3: 0,
+    V4: 1
 }
-// Modified in toggleBuildOptions if TCode V2 is not in build
-const availableVersions = [
-    {version: TCodeVersion.V2, versionName: "v0.2"},
-    {version: TCodeVersion.V3, versionName: "v0.3"},
-] 
 const latestTCodeVersion = TCodeVersion.V3;
-const LogLevel = {
-    ERROR: 0,
-    WARNING: 1,
-    INFO: 2,
-    DEBUG: 3,
-    VERBOSE: 4
+const MotorType = {
+    Servo: 0,
+    BLDC: 1
 };
-const BoardType = {
-    DEVKIT: 0,
-    CRIMZZON: 1,
-    ISAAC: 2
-}
+const ModuleType = {
+    WROOM32: 0,
+    S3: 1
+};
 const BuildFeature = {
     NONE: 0,
     DEBUG: 1,
     WIFI: 2,
     BLUETOOTH: 3,
-    DA: 4,
-    DISPLAY_: 5,
-    TEMP: 6,
-    HAS_TCODE_V2: 7,
-    HTTPS: 8
-}
-const MotorType = {
-    Servo: 0,
-    BLDC: 1
+    BLE: 4,
+    DA: 5,
+    DISPLAY_: 6,
+    TEMP: 7,
+    HTTPS: 8,
+    COEXIST: 9,
+    MAX_FEATURE: 10
 };
-const servoDegreeValue180 = 637; 
-const servoDegreeValue270 = 425; 
-dubugMessages = [];
 
+let BoardType = {
+    DEVKIT: 0,
+    ZERO: 1,
+    N8R8: 2,
+    CRIMZZON: 3,
+    ISAAC: 4,
+    SSR1PCB: 5
+};
+let DeviceType = {
+    NONE: 0,
+    OSR: 1,
+    SR6: 2,
+    SSR1: 3,
+    SSR2: 4,
+    TVIBE: 5
+};
+let BLEDeviceType = {
+    TCODE: 0,
+    LOVE: 1,
+    HC: 2
+};
+let BLELoveDeviceType = {
+    EDGE: 0
+};
+let BLDCEncoderType = {
+    NONE: 0,
+    MT6701: 1,
+    SPI: 2,
+    PWM: 3
+};
+const TCodeModifierType = {
+    INTERVAL: "I",
+    SPEED: "S"
+}
+dubugMessages = [];
+var tcodeVersions = [];
 var testDeviceUseIModifier = false;
 var testDeviceDisableModifier = false;
 var testDeviceModifierValue = "1000";
 var restartClicked = false;
 var serverPollingTimeOut = null;
+var polling = false;
 var staticIPAddressTimeout = null;
-var websocketRetryCount = 0;
+var hostnameTimeout = null;
+var upDateTimeout = null;
+var upDatePinsTimeout = null;
+var serverPollRetryCount = 0;
 var channelSliderList = [];
 var restartingAndChangingAddress = false;
 var resettingAllToDefault = false;
@@ -94,55 +151,30 @@ var startUpHostName;
 var startUpWebPort;
 var startUpStaticIP;
 var startUpLocalIP;
+var motorA;
+var motorB;
+const defaultDebounce = 3000;
 
 //PWM availible on: 2,4,5,12-19,21-23,25-27,32-33
-const validPWMpins = [2,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33];
-const inputOnlypins = [34,35,36,39];
-const adc1Pins = [36,37,38,39,32,33,34,35];
-const adc2Pins = [4,0,2,15,13,12,14,27,25,26];
-
-const AvailibleChannelsV2 = [
-    {channel: "L0", channelName: "Stroke", switch: false, sr6Only: false},
-    {channel: "L1", channelName: "Surge", switch: false, sr6Only: true},
-    {channel: "L2", channelName: "Sway", switch: false, sr6Only: true},
-    {channel: "L3", channelName: "Suck", switch: false, sr6Only: false},
-    {channel: "R0", channelName: "Twist", switch: false, sr6Only: false},
-    {channel: "R1", channelName: "Roll", switch: false, sr6Only: false},
-    {channel: "R2", channelName: "Pitch", switch: false, sr6Only: false},
-    {channel: "V0", channelName: "Vibe 0", switch: true, sr6Only: false},
-    {channel: "V1", channelName: "Vibe 1/Lube", switch: true, sr6Only: false}
-]
-const AvailibleChannelsV3 = [
-    {channel: "L0", channelName: "Stroke", switch: false, sr6Only: false},
-    {channel: "L1", channelName: "Surge", switch: false, sr6Only: true},
-    {channel: "L2", channelName: "Sway", switch: false, sr6Only: true},
-    {channel: "R0", channelName: "Twist", switch: false, sr6Only: false},
-    {channel: "R1", channelName: "Roll", switch: false, sr6Only: false},
-    {channel: "R2", channelName: "Pitch", switch: false, sr6Only: false},
-    {channel: "V0", channelName: "Vibe 1", switch: true, sr6Only: false},
-    {channel: "V1", channelName: "Vibe 2", switch: true, sr6Only: false},
-    {channel: "V2", channelName: "Vibe 3", switch: true, sr6Only: false},
-    {channel: "V3", channelName: "Vibe 4", switch: true, sr6Only: false},
-    {channel: "A0", channelName: "Suck manual", switch: false, sr6Only: false},
-    {channel: "A1", channelName: "Suck level", switch: false, sr6Only: false},
-    {channel: "A2", channelName: "Lube", switch: true, sr6Only: false},
-    {channel: "A3", channelName: "Squeeze", switch: false, sr6Only: false}
-]
-const AvailibleChannelsBLDC = [
-    {channel: "L0", channelName: "Stroke", switch: false, sr6Only: false},
-    {channel: "R0", channelName: "Twist", switch: false, sr6Only: false},
-    {channel: "V0", channelName: "Vibe 1", switch: true, sr6Only: false},
-    {channel: "V1", channelName: "Vibe 2", switch: true, sr6Only: false},
-    {channel: "V2", channelName: "Vibe 3", switch: true, sr6Only: false},
-    {channel: "V3", channelName: "Vibe 4", switch: true, sr6Only: false},
-    {channel: "A0", channelName: "Suck manual", switch: false, sr6Only: false},
-    {channel: "A1", channelName: "Suck level", switch: false, sr6Only: false},
-    {channel: "A2", channelName: "Lube", switch: true, sr6Only: false},
-    {channel: "A3", channelName: "Squeeze", switch: false, sr6Only: false}
-]
+let validPWMpins = [2,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33];
+let inputOnlypins = [34,35,36,39];
+let adc1Pins = [36,37,38,39,32,33,34,35];
+let adc2Pins = [4,0,2,15,13,12,14,27,25,26];
+let invalidPinsGlobal = [6, 7, 8, 9, 10, 11]; // ESP32 SPI flash https://randomnerdtutorials.com/esp32-pinout-reference-gpios/
 
 document.addEventListener("DOMContentLoaded", function() {
+    // Restore the "Advanced settings" toggle from localStorage BEFORE
+    // the page becomes visible, so users with the toggle off don't see
+    // a flash of the timer-channel/PWM-driver UI on every reload.
+    try {
+        var advOn = localStorage.getItem('advancedMode') === '1';
+        var cb = document.getElementById('advancedSettings');
+        if (cb) cb.checked = advOn;
+        document.body.classList.toggle('advanced-mode', advOn);
+    } catch(e) { /* localStorage may be unavailable; default = off */ }
     onDocumentLoad();
+    document.getElementById("page-body").style.visibility = "visible";
+    hideLoading();
 });
 
 function logdebug(message) {
@@ -150,77 +182,360 @@ function logdebug(message) {
         console.log(message);
 }
 function get(name, uri, callback, callbackFail) {
+    request("GET", name, uri, callback, callbackFail)
+}
+function post(name, uri, callback, callbackFail) {
+    request("POST", name, uri, callback, callbackFail)
+}
+function request(method, name, uri, callback, callbackFail) {
 	var xhr = new XMLHttpRequest();
-	xhr.open('GET', uri, true);
+	xhr.open(method, uri, true);
 	xhr.responseType = 'json';
 	xhr.onload = function() {
         var status = xhr.status;
         if (status !== 200) {
-			showError("Error loading "+name+"!");
-            if(callbackFail) 
+            // Suppress error toast while we're polling for the device to come
+            // back online (e.g. after restart). The poll loop intentionally
+            // probes a possibly-down endpoint and a popup on every retry just
+            // creates a noisy "Error loading ping!" loop.
+            if(!polling && !serverPollingTimeOut)
+                showError("Error loading "+name+"!");
+            if(callbackFail)
                 callbackFail(xhr);
 		} else {
             if(callback)
                 callback(xhr);
 		}
 	};
+    if(callbackFail) {
+        xhr.onerror = function() {
+            callbackFail(xhr);
+        }
+    }
 	xhr.send();
 }
 function onDocumentLoad() {
-    getSystemInfo();
+    // Seems some browsers keep the checked state during refresh for some reason...
+    const showApPassChk = document.getElementById("showAPModePass");
+    showApPassChk.checked = false;
+    const showWifiPassChk = document.getElementById("showWifiPass");
+    showWifiPassChk.checked = false;
+    getSystemInfo(true);
     createImportSettingsInputElement();
-    
+
     // debugTextElement = document.getElementById("debugText");
     // debugTextElement.scrollTop = debugTextElement.scrollHeight;
 }
+function pingDevice() {
+    polling = false;
+    if(serverPollingTimeOut) {
+        polling = true;
+        clearTimeout(serverPollingTimeOut);
+        serverPollingTimeOut = null;
+    }
+    // Probe `/` directly: any HTTP response (200, 302, 404 from a captive
+    // portal, …) means the web server is back up and we should reload. We
+    // bypass the JSON-parsing `request()` helper because the root is HTML and
+    // older firmware has no /ping endpoint, so a 404 there falsely looked
+    // like "device still down" and kept us in the poll loop forever.
+    var xhr = new XMLHttpRequest();
+    try { xhr.open("GET", "/?_=" + Date.now(), true); } catch(e) { startServerPoll(); return; }
+    xhr.timeout = 1500;
+    xhr.onload = function() {
+        // Any answered request proves the device's TCP stack + HTTP server
+        // are running again.
+        location.reload();
+    };
+    xhr.onerror = function() { startServerPoll(); };
+    xhr.ontimeout = function() { startServerPoll(); };
+    try { xhr.send(); } catch(e) { startServerPoll(); }
+}
 
-function getSystemInfo() {
+function getSystemInfo(chain) {
+    if(serverPollingTimeOut) {
+        return;
+    }
+    showLoading("Loading system info...");
     get("system info", EndPointType.System.uri, function(xhr) {
         systemInfo = xhr.response;
         if(!systemInfo) {
+            if(!polling)
+                showError("Error getting system info!");
+            startServerPoll();
+            return;
+        } else if(systemInfo.status === "restarting") {
+            startServerPoll();
+            return;
+        } else
+            setSystemInfo();
+        if(chain)
+            getDebugInfo(chain);
+        else if(!polling)
+            hideLoading();
+        serverPollRetryCount = 0;
+    }, function(xhr) {
+        if(!polling)
             showError("Error getting system info!");
+        startServerPoll();
+    });
+}
+function getDebugInfo(chain) {
+    if(serverPollingTimeOut) {
+        return;
+    }
+    showLoading("Loading debug info...");
+    get("debug info", EndPointType.DebugInfo.uri, function(xhr) {
+        const debugInfo = xhr.response;
+        setDebugInfo(debugInfo);
+        if(chain)
+            getPinSettings(chain);
+        else
+            hideLoading();
+    }, function(xhr) {
+        // Debug info is non-essential; if the endpoint is missing or fails,
+        // just continue the load chain instead of looping into a poll.
+        if(xhr && xhr.status === 404) {
+            if(chain) {
+                getPinSettings(chain);
+                return;
+            }
+            hideLoading();
             return;
         }
-        setSystemInfo();
-        getWifiSettings();
+        if(!polling)
+            showError("Error getting debug info!");
+        startServerPoll();
+    });
+}
+function getPinSettings(chain) {
+    showLoading("Loading pinout...");
+    get("Pinout settings", EndPointType.Pins.uri, function(xhr) {
+        pinoutSettings = xhr.response;
+        if(!pinoutSettings) {
+            showError("Error getting pinout!");
+        }
+        else {
+            setPinoutSettings();
+            // Seed the change-tracking snapshot so subsequent edits diff
+            // against firmware truth and only flag a restart when a
+            // non-hot-swap pin actually changed.
+            try { lastPinoutSnapshot = JSON.parse(JSON.stringify(pinoutSettings)); }
+            catch(e) { lastPinoutSnapshot = {}; }
+        }
+        if(chain)
+            getWifiSettings(chain);
+        else
+            hideLoading();
     });
 }
 
-function getWifiSettings() {
+function getWifiSettings(chain) {
+    showLoading("Loading network settings...");
     get("wifi settings", EndPointType.Wifi.uri, function(xhr) {
         wifiSettings = xhr.response;
         if(!wifiSettings || !wifiSettings["ssid"]) {
             showError("Error getting wifi settings!");
-            return;
         }
-        getMotionProviderSettings();
+        else {
+            startUpStaticIP = wifiSettings["staticIP"];
+            startUpLocalIP = wifiSettings["localIP"];
+            startUpWebPort = wifiSettings["webServerPort"];
+            startUpHostName = wifiSettings["hostname"];
+            setWifiSettings();
+        }
+        if(chain)
+            getMotionProviderSettings(chain);
+        else
+            hideLoading();
     });
 }
 
-function getMotionProviderSettings() {
+function getMotionProviderSettings(chain) {
+    showLoading("Loading motion generator settings...");
     get("motion settings", EndPointType.MotionProfile.uri, function(xhr) {
         motionProviderSettings = xhr.response;
         if(!motionProviderSettings || !motionProviderSettings["motionProfiles"]) {
             showError("Error getting motion provider settings!");
-            return;
         }
-        getButtonSettings();
+        if(chain)
+            getButtonSettings(chain);
+        else
+            hideLoading();
     });
 }
 
-function getButtonSettings() {
+function getButtonSettings(chain) {
+    showLoading("Loading button settings...");
     get("button settings", EndPointType.Buttons.uri, function(xhr) {
         buttonSettings = xhr.response;
         if(!buttonSettings || !buttonSettings["bootButtonCommand"]) {
             showError("Error getting button settings!");
-            return;
         }
-        getUserSettings();
+        if(chain)
+            getChannelsProfileSettings(chain);
+        else
+            hideLoading();
+    });
+}
+
+function getChannelsProfileSettings(chain) {
+    showLoading("Loading channel settings...");
+    get("channel settings", EndPointType.ChannelProfiles.uri, function(xhr) {
+        channelsProfileSettings = xhr.response;
+        if(!channelsProfileSettings) {
+            showError("Error getting channels profile settings!");
+        }
+        if(chain)
+            getUserSettings();
+        else
+            hideLoading();
     });
 }
 
 function postCommonSettings(debounce, callback) {
     updateUserSettings(debounce, EndPointType.Common.uri, userSettings, callback);
+}
+function postAndValidatePinoutSettings(debounce, callback) {
+    if(!debounce || debounce < 0)
+        debounce = 0;
+    if(upDatePinsTimeout)
+    {
+        clearTimeout(upDatePinsTimeout);
+    }
+    upDatePinsTimeout = setTimeout(() =>
+    {
+        if(validatePins()) {
+            updateUserSettings(0, EndPointType.Pins.uri, pinoutSettings, callback);
+        } else if(callback)
+            callback();
+    }, debounce);
+}
+function postPinoutSettings(debounce, callback) {
+    // Wrap the user-supplied callback so that, on a successful save, we
+    // automatically request a hot reapply of the PWM hardware (servos /
+    // vibes / lube). Saves the user from having to press "Reapply PWM"
+    // for any PIN/CHANNEL change covered by PWM_HOTSWAP_PIN_FIELDS — those
+    // outputs hot-swap via PwmManager::reapplyPwm without a reboot.
+    const wrapped = function() {
+        // Refresh the snapshot so the next diff is against the freshly
+        // persisted state.
+        try { lastPinoutSnapshot = JSON.parse(JSON.stringify(pinoutSettings)); }
+        catch(e) {}
+        requestReapplyPwm(false /*silent*/);
+        if (callback) callback();
+    };
+    updateUserSettings(debounce, EndPointType.Pins.uri, pinoutSettings, wrapped);
+}
+
+/**
+ * Fire the firmware /reapplyPwm endpoint. Used both by the Reapply button
+ * (showToast=true) and automatically after every pinout save (silent).
+ */
+function requestReapplyPwm(showToast) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", "/reapplyPwm", true);
+    xhr.responseType = 'json';
+    xhr.onreadystatechange = function() {
+        if (xhr.readyState !== 4) return;
+        if (showToast) {
+            if (xhr.status === 200) {
+                showInfoSuccess("PWM reapply requested. Outputs are reattaching from current settings.");
+            } else {
+                showError("PWM reapply failed (status " + xhr.status + ")");
+            }
+        } else if (xhr.status !== 200) {
+            logdebug("Silent /reapplyPwm failed status " + xhr.status);
+        }
+        // After the firmware finishes the reapply pass it has rebuilt its
+        // PwmManager failure table. Re-pull /systemInfo (lightweight) so we
+        // can update the per-pin error highlights.
+        if (xhr.status === 200) {
+            setTimeout(refreshPwmAttachErrors, 250);
+        }
+    };
+    xhr.send();
+}
+
+/**
+ * Lightweight re-fetch of /systemInfo whose only purpose is to update the
+ * pwmAttachErrors collection and re-paint the pin highlight overlay. Does
+ * NOT chain into getPinSettings/getUserSettings.
+ */
+function refreshPwmAttachErrors() {
+    get("system info (pwm errors)", EndPointType.System.uri, function(xhr) {
+        if (!xhr.response) return;
+        if (Array.isArray(xhr.response.pwmAttachErrors)) {
+            systemInfo.pwmAttachErrors = xhr.response.pwmAttachErrors;
+        } else {
+            systemInfo.pwmAttachErrors = [];
+        }
+        applyPwmAttachErrorHighlights();
+    });
+    // Also re-fetch the pinout. PwmManager may have shifted the
+    // backend (LEDC<->MCPWM) for some pins as a result of the reapply,
+    // and the firmware can update CHANNEL hints to match. Pull the
+    // current truth so the GUI's timer/channel cells stay aligned with
+    // what's actually running on hardware.
+    get("Pinout (post-reapply)", EndPointType.Pins.uri, function(xhr) {
+        if (!xhr.response) return;
+        pinoutSettings = xhr.response;
+        setPinoutSettings();
+        try { lastPinoutSnapshot = JSON.parse(JSON.stringify(pinoutSettings)); }
+        catch(e) {}
+    });
+}
+
+/**
+ * Walk every *_PIN <input> in the DOM. If its current numeric value matches
+ * a pin reported in systemInfo.pwmAttachErrors, paint it with the
+ * pwmAttachError class and tooltip the reason. Pins that are no longer on
+ * the failure list have their highlight cleared.
+ */
+function applyPwmAttachErrorHighlights() {
+    document.querySelectorAll('.pwmAttachError').forEach(function(el) {
+        el.classList.remove('pwmAttachError');
+        if (el.dataset.pwmErrTooltip) {
+            el.removeAttribute('title');
+            delete el.dataset.pwmErrTooltip;
+        }
+    });
+    if (!systemInfo || !Array.isArray(systemInfo.pwmAttachErrors) || !systemInfo.pwmAttachErrors.length) {
+        return;
+    }
+    var pinInputs = document.querySelectorAll('input[id$="_PIN"]');
+    systemInfo.pwmAttachErrors.forEach(function(err) {
+        if (err == null || typeof err.pin !== 'number' || err.pin < 0) return;
+        pinInputs.forEach(function(inp) {
+            if (parseInt(inp.value, 10) !== err.pin) return;
+            inp.classList.add('pwmAttachError');
+            inp.title = "PWM attach failed for '" + (err.name || '?') +
+                "' @ " + err.freq + " Hz / " + err.resolution + "-bit. " +
+                "No free LEDC timer or MCPWM operator available after auto-fallback. " +
+                "Try a different pin, or change the timer freq/resolution to match an existing one.";
+            inp.dataset.pwmErrTooltip = '1';
+        });
+    });
+}
+
+/**
+ * Compare the current pinoutSettings against the last-persisted snapshot
+ * and decide whether the change requires a firmware restart. Returns true
+ * if any non-hot-swappable pin field changed; in that case the caller
+ * should call setRestartRequired() to surface the indicator.
+ */
+function pinChangeRequiresRestart() {
+    for (const key of Object.keys(pinoutSettings)) {
+        if (pinoutSettings[key] === lastPinoutSnapshot[key]) continue;
+        // For arrays (BUTTON_SET_PINS) compare via JSON
+        if (typeof pinoutSettings[key] === 'object') {
+            if (JSON.stringify(pinoutSettings[key]) === JSON.stringify(lastPinoutSnapshot[key])) continue;
+        }
+        if (!PWM_HOTSWAP_PIN_FIELDS.has(key)) {
+            logdebug("Pin change requires restart (non-hot-swap field: " + key + ")");
+            return true;
+        }
+    }
+    return false;
 }
 function postWifiSettings(debounce, callback) {
     updateUserSettings(debounce, EndPointType.Wifi.uri, wifiSettings, callback);
@@ -228,34 +543,45 @@ function postWifiSettings(debounce, callback) {
 function postButtonSettings(debounce, callback) {
     updateUserSettings(debounce, EndPointType.Buttons.uri, buttonSettings, callback);
 }
-function postMotionProfileSettings(debounce) {
-    MotionGenerator.updateSettings(debounce, null, 0);
+function postMotionProfileSettings(debounce, callback) {
+    updateUserSettings(debounce, EndPointType.MotionProfile.uri, motionProviderSettings, callback);
+}
+function postChannelsProfileSettings(debounce, callback) {
+    updateUserSettings(debounce, EndPointType.ChannelProfiles.uri, channelsProfileSettings, callback);
 }
 
+
 function updateALLUserSettings() {
-    postCommonSettings(0, updateWifiSettingsChain);
+    postCommonSettings(0, updatePinoutChain);
+}
+var updatePinoutChain = function() {
+    postAndValidatePinoutSettings(0, updateWifiSettingsChain);
 }
 var updateWifiSettingsChain = function() {
     postWifiSettings(0, updateButtonSettingsChain);
 }
 var updateButtonSettingsChain = function() {
-    postButtonSettings(0, updateMotionProfileSettings);
+    postButtonSettings(0, updateMotionProfileSettingsChain);
 }
-var updateMotionProfileSettings = function() {
-    postMotionProfileSettings();
+var updateMotionProfileSettingsChain = function() {
+    postMotionProfileSettings(0, updateChannelsProfileSettingsChain);
+}
+var updateChannelsProfileSettingsChain = function() {
+    postChannelsProfileSettings(0);
 }
 
-// ALWAYS CALL setUserSettings/getUserSettings LAST! 
+// ALWAYS CALL setUserSettings/getUserSettings LAST!
 // This is so it can set all the values from the various sources and other
 // methods can call a single method instead of all of them.
 function getUserSettings() {
+    showLoading("Loading common settings...");
     get("common settings", EndPointType.Common.uri, function(xhr) {
         userSettings = xhr.response;
-        if(!userSettings || !userSettings["TCodeVersion"]) {
+        if(!userSettings || userSettings["TCodeVersion"] == undefined) {
             showError("Error getting user settings!");
-            return;
         }
-        setUserSettings();
+        else
+            setUserSettings();
         initWebSocket();
     });
 }
@@ -265,34 +591,43 @@ function initWebSocket() {
 		var wsUri = (hasFeature(BuildFeature.HTTPS) ? "wss://" : "ws://") + window.location.host + "/ws";
 		if (typeof MozWebSocket == 'function')
 			WebSocket = MozWebSocket;
-		if ( websocket && websocket.readyState == 1 )
-			websocket.close();
+		if ( websocket ) {
+			// Detach handlers before closing so this deliberate close
+			// doesn't trigger onclose -> startServerPoll, which would
+			// re-chain getUserSettings -> initWebSocket and reload-loop.
+			websocket.onopen = null;
+			websocket.onclose = null;
+			websocket.onerror = null;
+			websocket.onmessage = null;
+			try { websocket.close(); } catch(e) {}
+		}
 		websocket = new WebSocket( wsUri );
 		websocket.onopen = function (evt) {
 			//xtpConnected = true;
 			logdebug("CONNECTED");
-            if(restartClicked) {
-                getUserSettings();
-                restartClicked = false;
-            }
+            // The polling chain (getSystemInfo -> ... -> getUserSettings -> initWebSocket)
+            // already refreshed everything before we got here, so just clear the
+            // restart flag and hide loading. Calling getUserSettings() here would
+            // re-enter initWebSocket() and cause a reload loop.
+            restartClicked = false;
             hideLoading();
             if(serverPollingTimeOut) {
                 clearTimeout(serverPollingTimeOut);
                 serverPollingTimeOut = null;
             }
-            websocketRetryCount = 0;
+            serverPollRetryCount = 0;
 			//updateSettingsUI();
 		};
 		websocket.onclose = function (evt) {
 			logdebug("DISCONNECTED");
-            
+
             if(!serverPollingTimeOut && !restartingAndChangingAddress) {
                 let message = "Server disconnected, waiting for restart...";
                 if(systemInfo.apMode) {
                     message += "\n(Hint: Make sure you are connected to the AP in wifi networks."
                 }
                 showLoading(message);
-                checkForServer();
+                startServerPoll();
             }
             //alert('Web socket disconnected: To use some features you need to make sure the device is on and connected and refresh the page.');
 			//xtpConnected = false;
@@ -304,7 +639,7 @@ function initWebSocket() {
 		websocket.onerror = function (evt) {
             if(!serverPollingTimeOut && !restartingAndChangingAddress) {
                 showLoading("Server error, waiting for restart...");
-                checkForServer();
+                startServerPoll();
             }
 			//alert('ERROR: ' + evt.data + ", Address: "+wsUri);
 			//xtpConnected = false;
@@ -312,7 +647,7 @@ function initWebSocket() {
 	} catch (exception) {
         if(!serverPollingTimeOut && !restartingAndChangingAddress) {
             showLoading("Server exception, waiting for restart...");
-            checkForServer();
+            startServerPoll();
         }
         //alert('ERROR: ' + exception + ", Address: "+wsUri);
 		//xtpConnected = false;
@@ -346,10 +681,18 @@ function wsCallBackFunction(evt) {
             case "batteryStatus":
                 wsBatteryStatus(data);
                 break;
+            case "powerStatus":
+                wsPowerStatus(data);
+                break;
             case "debug":
 				var message = data["message"];
                 debug(message);
                 break;
+            case "channelRangesEnabled":
+				var enabled = data["message"];
+                DeviceRangeSlider.updateChannelRangesTemp(enabled == "true");
+                break;
+
 		}
 	}
 	catch(e) {
@@ -367,15 +710,39 @@ function debug(message) {
     }
 }
 
-function setDebug() {
-    userSettings["logLevel"] = parseInt(document.getElementById('debug').value);
+function debounceInput(debounceRefName, callBack, debounceInMs)
+{
+    if(debounceTimeouts[debounceRefName] !== null)
+    {
+        clearTimeout(debounceTimeouts[debounceRefName]);
+    }
+    debounceTimeouts[debounceRefName] = setTimeout(() => {
+        debounceTimeouts[debounceRefName] = null;
+        callBack();
+    }, debounceInMs == null || debounceInMs == undefined ? defaultDebounce : debounceInMs);
 
+}
+
+function setLogLevelUI() {
+    const clearTagsButton = document.getElementById('clearTagsButton');
+    const clearFiltersButton = document.getElementById('clearFiltersButton');
+    const selectedIncludes = userSettings["log-include-tags"];
+    const selectedExcludes = userSettings["log-exclude-tags"];
+    clearTagsButton.disabled = !selectedIncludes?.length;
+    clearFiltersButton.disabled = !selectedExcludes?.length;
+
+    clearTagsButton.innerText = "Clear included" + (selectedIncludes.length ? ": "+ selectedIncludes.length : "");
+    clearFiltersButton.innerText = "Clear excluded" + (selectedExcludes.length ? ": "+ selectedExcludes.length : "");
+}
+function setLogLevel() {
+    userSettings["logLevel"] = parseInt(document.getElementById('logLevel').value);
     const selectedIncludes = document.querySelectorAll('#log-include-tags option:checked');
     userSettings["log-include-tags"] =  Array.from(selectedIncludes).map(el => el.value);
 
     const selectedExcludes = document.querySelectorAll('#log-exclude-tags option:checked');
     userSettings["log-exclude-tags"] = Array.from(selectedExcludes).map(el => el.value);
 
+    setLogLevelUI();
     //document.getElementById("log-exclude-tags").disabled = selectedIncludes.length > 0;
     // if(userSettings["logLevel"] == LogLevel.VERBOSE)
     //     alert("There are not enough resources to send VERBOSE messages to the site.\nUse serial to view them.")
@@ -387,6 +754,7 @@ function clearTags(name) {
     for (var i = 0; i < element.options.length; i++) {
         element.options[i].selected = false;
     }
+    setLogLevelUI();
 	updateUserSettings();
 }
 function clearLog() {
@@ -406,57 +774,85 @@ function playSuccess() {
 }
 // function playFail() {
 //     if(playSounds) {
-//         var snd = new Audio("data:audio/mp3;base64,SUQzAwAAAAAfdlRJVDIAAAAbAAAAYmFkIGFuc3dlciAwMSBzb3VuZCBlZmZlY3RUUEUxAAAAFAAAAGZyZWVzb3VuZGVmZmVjdC5uZXRUQUxCAAAAFAAAAGZyZWVzb3VuZGVmZmVjdC5uZXRUWUVSAAAABQAAADIwMTZUQ09OAAAABQAAAFJvY2tDT01NAAAADwAAAGVuZwBleGNlbGxlbnQhVFJDSwAAAAYAAAAwNC8xNgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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");  
+//         var snd = new Audio("data:audio/mp3;base64,SUQzAwAAAAAfdlRJVDIAAAAbAAAAYmFkIGFuc3dlciAwMSBzb3VuZCBlZmZlY3RUUEUxAAAAFAAAAGZyZWVzb3VuZGVmZmVjdC5uZXRUQUxCAAAAFAAAAGZyZWVzb3VuZGVmZmVjdC5uZXRUWUVSAAAABQAAADIwMTZUQ09OAAAABQAAAFJvY2tDT01NAAAADwAAAGVuZwBleGNlbGxlbnQhVFJDSwAAAAYAAAAwNC8xNgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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");
 //         snd.play();
 //     }
 // }
-function onDefaultClick() 
-{		
-	if (confirm("WARNING! Are you sure you wish to reset ALL settings?\nThis will restart your device and you may need to reconfigure your WiFi settings!")) 
+function onDefaultClick()
+{
+	if (confirm("WARNING! Are you sure you wish to reset ALL settings?\nThis will restart your device and you may need to reconfigure your WiFi settings!"))
 	{
-        showInfo("Resetting...");
+        showInfo("Setting default...");
 		var xhr = new XMLHttpRequest();
 		xhr.open("POST", "/default", true);
-		xhr.onreadystatechange = function() 
+		xhr.onreadystatechange = function()
 		{
-			if (xhr.readyState === 4) 
+			if (xhr.readyState === 4)
 			{
                 if (xhr.status !== 200) {
                     showError("Error setting default!");
                 } else {
                     showInfoSuccess("Settings reset!");
-                    resettingAllToDefault = true;
-                    onRestartClick("\nYou may need to reconfigure your wifi with the instructions provided in the zip.");
+                    //resettingAllToDefault = true;
+                    showLoading("Restarting...");
+                    startServerPoll();
+                    //onRestartClick("\nYou may need to reconfigure your wifi with the instructions provided in the zip.");
                 }
 			}
 		}
 		xhr.send();
 	}
 }
-function setPinoutDefault(newBoardType) {
-    showInfo("Resetting pinout...");
+function postBoardType(newBoardType) {
+    showInfo("Changing board...");
     var xhr = new XMLHttpRequest();
-    xhr.open("POST", "/pinoutDefault/"+newBoardType, true);
-    xhr.onreadystatechange = function() 
+    xhr.open("POST", "/changeBoard?value="+newBoardType, true);
+    xhr.onreadystatechange = function()
     {
-        if (xhr.readyState === 4) 
+        if (xhr.readyState === 4)
         {
             if (xhr.status !== 200) {
                 showError("Error setting pinout default!");
             } else {
-                getUserSettings();
-                showInfoSuccess("Pinout reset!");
-                showRestartRequired();
-                //document.getElementById('resetBtn').disabled = false ;
+                showInfoSuccess("Board changed!");
+                // getPinSettings();
+                // showRestartRequired();
+                showLoading("Restarting...");
+                startServerPoll();
+            }
+        }
+    }
+    xhr.send();
+}
+function postDeviceType(deviceType) {
+    showInfo("Changing device...");
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", "/changeDevice?value="+deviceType, true);
+    xhr.onreadystatechange = function()
+    {
+        if (xhr.readyState === 4)
+        {
+            if (xhr.status !== 200) {
+                showError("Error setting pinout default!");
+            } else {
+                showInfoSuccess("Device changed!");
+                // getPinSettings();
+                // showRestartRequired();
+                showLoading("Restarting...");
+                startServerPoll();
             }
         }
     }
     xhr.send();
 }
 
-function onRestartClick(optionalMessage) 
-{		
-    var warningmessage = "Device restarting...";
+function onReapplyPwmClick()
+{
+    requestReapplyPwm(true /*showToast*/);
+}
+
+function onRestartClick(optionalMessage)
+{    var warningmessage = "Device restarting...";
     if(optionalMessage) {
         warningmessage += optionalMessage;
     }
@@ -465,25 +861,31 @@ function onRestartClick(optionalMessage)
     var xhr = new XMLHttpRequest();
     xhr.open("POST", "/restart", true);
 	xhr.responseType = 'json';
-    xhr.onreadystatechange = function() 
+    xhr.onreadystatechange = function()
     {
-        if (xhr.readyState === 4) 
+        if (xhr.readyState === 4)
         {
             if(xhr.status == 200) {
                 var response = xhr.response;
+                var message = "";
                 logdebug("Restart succeed!");
+                if(wifiSettings["bluetoothEnabled"] && systemInfo["moduleType"] == ModuleType.WROOM32) {
+                    message += "The web server will be disabled because bluetooth has been enabled.<br>You will need to disable bluetooth via serial usb commands<br>to get back to this page after rebooting.<br><br>";
 
+                    showLoading(message);
+                    return;
+                }
                 if(!resettingAllToDefault) {// There redirect should be to the default IP address.
                     checkRestartRedirect();
                 } else {
                     restartingAndChangingAddress = true;
                 }
-                
+
                 if(restartingAndChangingAddress) {
-                    var isIPStatic = userSettings["staticIP"];
-                    var localIP = userSettings["localIP"];
-                    var webServerPort = userSettings["webServerPort"];
-                    var hostname = userSettings["hostname"];
+                    var isIPStatic = wifiSettings["staticIP"];
+                    var localIP = wifiSettings["localIP"];
+                    var webServerPort = wifiSettings["webServerPort"];
+                    var hostname = wifiSettings["hostname"];
                     var url = "http://"+hostname+".local";
                     url += webServerPort === 80 ? "" : ":"+webServerPort;
                     if(resettingAllToDefault) {
@@ -492,9 +894,9 @@ function onRestartClick(optionalMessage)
                     }
                     var staticIPUrl = "http://"+localIP;
                     staticIPUrl += webServerPort === 80 ? "" : ":"+webServerPort;
-                    var message = "Device restarting, the page will redirect to<br><a href='"+url+"'>"+url+"</a> in 10 seconds<br>";
+                    message += "Device restarting, the page will redirect to<br><a href='"+url+"'>"+url+"</a> in 10 seconds<br>";
                     if(!resettingAllToDefault) {
-                        message += isIPStatic ? "If this doesnt work, you can try using this url<br><a href='"+staticIPUrl+"'>"+staticIPUrl+"</a> when the device reboots." 
+                        message += isIPStatic ? "If this doesnt work, you can try using this url<br><a href='"+staticIPUrl+"'>"+staticIPUrl+"</a> when the device reboots."
                             : "If this doesnt work, you will need<br>to find the dymanic ip address of the esp32."
                     }
                     showLoading(message);
@@ -502,6 +904,9 @@ function onRestartClick(optionalMessage)
                         logdebug("Redirecting to: " + url)
                         window.location.href = url;
                     }, 10000);
+                    //startServerPoll(url);
+                } else {
+                    startServerPoll();
                 }
                 hideRestartRequired();
             } else {
@@ -514,35 +919,56 @@ function onRestartClick(optionalMessage)
 function isWebSocketConnected() {
     if(!websocket)
         return false;
-    return websocket.readyState !== WebSocket.OPEN;
+    return websocket.readyState === WebSocket.OPEN;
 }
-function checkForServer() {
-    if(serverPollingTimeOut) {
-        clearTimeout(serverPollingTimeOut);
-        serverPollingTimeOut = null;
-    }
-    if(websocketRetryCount > 10) {
-        showLoading("Websocket timed out. Please refresh the page for full functionality.");
+
+function isSR6() {
+    return userSettings["deviceType"] == DeviceType.SR6;
+}
+function isOSR() {
+    return userSettings["deviceType"] == DeviceType.OSR;
+}
+function isSSR1() {
+    return userSettings["deviceType"] == DeviceType.SSR1;
+}
+function isSSR2() {
+    return userSettings["deviceType"] == DeviceType.SSR2;
+}
+function isBoardType(boardType) {
+    return userSettings["boardType"] === boardType;
+}
+function isModuleType(moduleType) {
+    return systemInfo["moduleType"] == moduleType;
+}
+function isMotorType(motorType) {
+    return systemInfo.motorType == motorType
+}
+function isBLDCSPI() {
+    return userSettings["BLDC_Encoder"] == BLDCEncoderType.SPI || userSettings["BLDC_Encoder"] == BLDCEncoderType.MT6701;
+}
+
+function startServerPoll() {
+    if(serverPollRetryCount == 10) {
+        showLoading("Connection timed out<br>Please manually refresh the page when the device is back online.");
         return;
     }
-    if(isWebSocketConnected() && websocket.readyState !== WebSocket.CONNECTING) {
-        logdebug("Websocket closed retrying..");
-        initWebSocket();
-        websocketRetryCount++;
-        serverPollingTimeOut = setTimeout(checkForServer, 2000);
-    } else if(isWebSocketConnected()) {
-        logdebug("Websocket open..");
-        if(serverPollingTimeOut) {
-            clearTimeout(serverPollingTimeOut);
-            serverPollingTimeOut = null;
-        }
-    }
+    const message = "Looking for device" + (serverPollRetryCount == 0 ? "..." : ": " + (serverPollRetryCount + 1) + "/10");
+    showLoading(message);
+    if(serverPollingTimeOut)
+        clearTimeout(serverPollingTimeOut);
+    serverPollRetryCount++;
+    serverPollingTimeOut = setTimeout(function() {
+        pingDevice();
+    }, 2000);
 }
 
 function setSystemInfo() {
     if(!systemInfo)
         showError("Error getting system info!");
+    if(systemInfo.restartRequired)
+        showRestartRequired();
     document.getElementById('version').value = systemInfo.esp32Version;
+    document.getElementById('macAddressSystemInfo').value = systemInfo.mac;
     document.getElementById('ipAddressSystemInfo').value = systemInfo.localIP;
     document.getElementById('gatewaySystemInfo').value = systemInfo.gateway;
     document.getElementById('subnetSystemInfo').value = systemInfo.subnet;
@@ -552,7 +978,19 @@ function setSystemInfo() {
     document.getElementById('chipCores').value = systemInfo.chipCores;
     document.getElementById('chipID').value = systemInfo.chipID;
 
+    tcodeVersions = systemInfo.tcodeVersions;
+
+    const logLevelElement = document.getElementById('logLevel');
+    removeAllChildren(logLevelElement);
+    for(let i=0;i<systemInfo.logLevels.length;i++) {
+        const option = document.createElement("option");
+        option.innerText = systemInfo.logLevels[i].name;
+        option.value = systemInfo.logLevels[i].value;
+        logLevelElement.appendChild(option);
+    }
+
     var excludedTagsElement = document.getElementById('log-exclude-tags');
+    removeAllChildren(excludedTagsElement);
     systemInfo.availableTags.forEach(element => {
         var option = document.createElement("option");
         option.value = element;
@@ -561,41 +999,252 @@ function setSystemInfo() {
     });
 
     var includedTagsElement = document.getElementById('log-include-tags');
+    removeAllChildren(includedTagsElement);
     systemInfo.availableTags.forEach(element => {
         var option = document.createElement("option");
         option.value = element;
         option.innerText = element;
         includedTagsElement.appendChild(option);
     });
-    
+
     var i2cAddressesElement = document.getElementById("Display_I2C_Address");
+    removeAllChildren(i2cAddressesElement);
     systemInfo.systemI2CAddresses.forEach(element => {
         var option = document.createElement("option");
         option.value = element;
         option.innerText = element;
         i2cAddressesElement.appendChild(option);
     });
-    
+    var bleDeviceTypeElement = document.getElementById("bleDeviceType");
+    removeAllChildren(bleDeviceTypeElement);
+    systemInfo.bleDeviceTypes.forEach(element => {
+        var option = document.createElement("option");
+        option.value = element.value;
+        option.innerText = element.name;
+        bleDeviceTypeElement.appendChild(option);
+        BLEDeviceType[element.name] = element.value;
+    });
+    var bleLoveDeviceTypeElement = document.getElementById("bleLoveDeviceType");
+    removeAllChildren(bleLoveDeviceTypeElement);
+    systemInfo.bleLoveDeviceTypes.forEach(element => {
+        var option = document.createElement("option");
+        option.value = element.value;
+        option.innerText = element.name;
+        bleLoveDeviceTypeElement.appendChild(option);
+        BLELoveDeviceType[element.name] = element.value;
+    });
+    if(systemInfo.motorType === MotorType.BLDC)
+        setupEncoderTypes();
+    setupLubeButtonPinModes();
+
     setupBoardTypes();
+    setupDeviceTypes();
     toggleBuildOptions();
     toggleMotorTypeOptions();
-    
-    //validPWMpins = [17,25,27];
-    //validPWMpins = [2,4,5,12,13,14,15,17,21,22,25,27,32];
+    setupTimerChannels();
+    toggleBLESettings();
+    toggleBluetoothSettings();
+
+    if(systemInfo["moduleType"] == ModuleType.S3) {
+        // ESP32-S3 GPIOs: 0-21 and 26-48 are usable. 22-25 do not exist on the chip.
+        // Only GPIO 46 is strictly input-only. GPIO 0, 45, 46 are strapping pins (use with caution).
+        // GPIOs 47 and 48 are valid MCPWM-capable outputs.
+        validPWMpins = [];
+        invalidPinsGlobal = []; // I dont know what pins can be used or not
+        for(let i=0;i<=21;i++) {
+            if(i === 46) continue; // input-only (defensive; not in this range)
+            validPWMpins.push(i);
+        }
+        for(let i=26;i<=48;i++) {
+            if(i === 46) continue; // input-only
+            validPWMpins.push(i);
+        }
+        inputOnlypins = [46];
+
+        adc1Pins = [1,2,3,4,5,6,7,8,9,10];
+        adc2Pins = [11,12,13,14,15,16,17,18,19,20];
+    }
+
+    // Refresh the "PWM availible on:" hint text so it reflects the actual
+    // platform — the HTML default is the WROOM32 list. ESP32-S3 has nearly
+    // every GPIO PWM-capable, so the hardcoded copy was misleading.
+    updatePwmAvailableText();
 
     document.getElementById('lastRebootReason').value = systemInfo.lastRebootReason;
+
+    // Build the manual PWM test panel now that validPWMpins and
+    // systemInfo.availableTimers are populated.
+    if (typeof PwmTest !== 'undefined') {
+        try { PwmTest.setup(); } catch (e) { console.warn('PwmTest.setup', e); }
+    }
 }
+
+/**
+ * Render the current `validPWMpins` array as a compact human-readable range
+ * string ("2,4,5,12-19,21-23,...") and write it into #pwmAvailableInfo.
+ * Called after `setSystemInfo` has populated `validPWMpins` for the active
+ * platform (WROOM32 vs S3).
+ */
+function updatePwmAvailableText() {
+    const target = document.getElementById('pwmAvailableInfo');
+    if(!target) return;
+    if(!Array.isArray(validPWMpins) || validPWMpins.length === 0) {
+        target.textContent = "PWM availible on: (none)";
+        return;
+    }
+    // Sort numerically and collapse contiguous runs into "a-b" ranges.
+    const pins = validPWMpins.slice().sort((a,b) => a - b);
+    const parts = [];
+    let runStart = pins[0];
+    let runEnd = pins[0];
+    for(let i = 1; i < pins.length; i++) {
+        if(pins[i] === runEnd + 1) {
+            runEnd = pins[i];
+        } else {
+            parts.push(runStart === runEnd ? `${runStart}` : `${runStart}-${runEnd}`);
+            runStart = runEnd = pins[i];
+        }
+    }
+    parts.push(runStart === runEnd ? `${runStart}` : `${runStart}-${runEnd}`);
+
+    let label = `PWM availible on: ${parts.join(',')}`;
+    if(systemInfo["moduleType"] == ModuleType.S3) {
+        // S3-specific guidance — strapping pins and missing 22-25.
+        label += " (GPIO 22-25 don't exist on S3; 0, 45, 46 are strapping pins — use with caution)";
+    }
+    target.textContent = label;
+}
+
+function setDebugInfo(debugInfo) {
+
+    const tbody = document.getElementById('lastBootReasons');
+
+    removeAllChildren(tbody);
+    if(!debugInfo || !debugInfo.lastBootReasons || !debugInfo.lastBootReasons.length)
+    {
+        const tr = document.createElement("tr");
+        const tdNone = document.createElement("td");
+        tdNone.colSpan = "2";
+        tdNone.innerText = "These are not the droids you're looking for. Move along..."
+        tr.appendChild(tdNone);
+        tbody.appendChild(tr);
+        return;
+    }
+    debugInfo.lastBootReasons.sort((a, b) => b.eventID-a.eventID);
+    debugInfo.lastBootReasons.forEach(x => {
+        const tr = document.createElement("tr");
+        const tdDate = document.createElement("td");
+        const tdReason = document.createElement("td");
+        tdDate.innerText = x["eventID"];
+        tdReason.innerText = x["reason"];
+        tr.appendChild(tdDate);
+        tr.appendChild(tdReason);
+        tbody.appendChild(tr);
+    });
+}
+
+function clearRebootReasons()
+{
+    post("Clear reboot reasons", EndPointType.DebugInfo.uri, () => {
+        getDebugInfo();
+    });
+}
+
 function setWifiSettings() {
     document.getElementById("ssid").value = wifiSettings["ssid"];
     document.getElementById("wifiPass").value = wifiSettings["wifiPass"];
+    document.getElementById('bluetoothEnabled').checked = wifiSettings["bluetoothEnabled"];
+
+    document.getElementById('bleEnabled').checked = wifiSettings["bleEnabled"];
+    document.getElementById('bleDeviceType').value = wifiSettings["bleDeviceType"];
+    toggleBLEDeviceTypes();
+    document.getElementById('bleLoveDeviceType').value = wifiSettings["bleLoveDeviceType"];
+    toggleBLELoveDeviceTypes();
+
+    document.getElementById("staticIP").checked = wifiSettings["staticIP"];
+    document.getElementById("localIPInput").value = wifiSettings["localIP"];
+    document.getElementById("gatewayInput").value = wifiSettings["gateway"];
+    document.getElementById("subnetInput").value = wifiSettings["subnet"];
+    document.getElementById("dns1Input").value = wifiSettings["dns1"];
+    document.getElementById("dns2Input").value = wifiSettings["dns2"];
+    toggleStaticIPSettings(wifiSettings["staticIP"]);
+    document.getElementById("udpServerPort").value = wifiSettings["udpServerPort"];
+    document.getElementById("webServerPort").value = wifiSettings["webServerPort"];
+    document.getElementById("hostname").value = wifiSettings["hostname"];
+    document.getElementById("friendlyName").value = wifiSettings["friendlyName"];
+
+    document.getElementById("apModeSSID").value = wifiSettings["apModeSSID"];
+    document.getElementById("apModePass").value = wifiSettings["apModePass"];
+    document.getElementById("apModeHidden").checked = wifiSettings["apModeHidden"];
+    document.getElementById("apModeChannel").value = wifiSettings["apModeChannel"];
+    document.getElementById("apModeIP").value = wifiSettings["apModeIP"];
+    document.getElementById("apModeSubnet").value = wifiSettings["apModeSubnet"];
+    document.getElementById("apModeGateway").value = wifiSettings["apModeGateway"];
 }
-function setUserSettings() 
+function setPinoutSettings() {
+    if(systemInfo.motorType === MotorType.BLDC) {
+        BLDCMotor.setupPins();
+    } else {
+        document.getElementById("RightServo_PIN").value = pinoutSettings["RightServo_PIN"];
+        document.getElementById("LeftServo_PIN").value = pinoutSettings["LeftServo_PIN"];
+        document.getElementById("RightUpperServo_PIN").value = pinoutSettings["RightUpperServo_PIN"];
+        document.getElementById("LeftUpperServo_PIN").value = pinoutSettings["LeftUpperServo_PIN"];
+        document.getElementById("PitchLeftServo_PIN").value = pinoutSettings["PitchLeftServo_PIN"];
+        document.getElementById("PitchRightServo_PIN").value = pinoutSettings["PitchRightServo_PIN"];
+        // if(isOSR() || isSR6()) {
+            setPinChannel("RightServo_CHANNEL", pinoutSettings["RightServo_CHANNEL"]);
+            setPinChannel("LeftServo_CHANNEL", pinoutSettings["LeftServo_CHANNEL"]);
+            setPinChannel("PitchLeftServo_CHANNEL", pinoutSettings["PitchLeftServo_CHANNEL"]);
+        // }
+        // if(isSR6()) {
+            setPinChannel("RightUpperServo_CHANNEL", pinoutSettings["RightUpperServo_CHANNEL"]);
+            setPinChannel("LeftUpperServo_CHANNEL", pinoutSettings["LeftUpperServo_CHANNEL"]);
+            setPinChannel("PitchRightServo_CHANNEL", pinoutSettings["PitchRightServo_CHANNEL"]);
+        // }
+    }
+    document.getElementById("TwistFeedBack_PIN").value = pinoutSettings["TwistFeedBack_PIN"];
+    document.getElementById("ValveServo_PIN").value = pinoutSettings["ValveServo_PIN"];
+	document.getElementById("TwistServo_PIN").value = pinoutSettings["TwistServo_PIN"];
+    document.getElementById("Vibe0_PIN").value = pinoutSettings["Vibe0_PIN"];
+    document.getElementById("Vibe1_PIN").value = pinoutSettings["Vibe1_PIN"];
+    document.getElementById("Vibe2_PIN").value = pinoutSettings["Vibe2_PIN"];
+    document.getElementById("Vibe3_PIN").value = pinoutSettings["Vibe3_PIN"];
+	document.getElementById("LubeButton_PIN").value = pinoutSettings["LubeButton_PIN"];
+	document.getElementById("Squeeze_PIN").value = pinoutSettings["Squeeze_PIN"];
+	// document.getElementById("Display_Rst_PIN").value = pinoutSettings["Display_Rst_PIN"];
+	// document.getElementById("Display_Rst_PIN").readOnly = true;
+	document.getElementById("Temp_PIN").value = pinoutSettings["Temp_PIN"];
+	document.getElementById("Heater_PIN").value = pinoutSettings["Heater_PIN"];
+    document.getElementById('Case_Fan_PIN').value = pinoutSettings["Case_Fan_PIN"];
+    document.getElementById('Internal_Temp_PIN').value = pinoutSettings["Internal_Temp_PIN"];
+    document.getElementById('i2cSda_PIN').value = pinoutSettings["i2cSda_PIN"];
+    document.getElementById('i2cScl_PIN').value = pinoutSettings["i2cScl_PIN"];
+    document.getElementById('Voltage_3V3_PIN').value = pinoutSettings["Voltage_3V3_PIN"];
+    document.getElementById('Voltage_5V_PIN').value = pinoutSettings["Voltage_5V_PIN"];
+    document.getElementById('Voltage_Battery_PIN').value = pinoutSettings["Voltage_Battery_PIN"];
+    document.getElementById('Voltage_Motor_PIN').value = pinoutSettings["Voltage_Motor_PIN"];
+    document.getElementById('Voltage_Bus_PIN').value = pinoutSettings["Voltage_Bus_PIN"];
+
+    setPinChannel("Vibe0_CHANNEL", pinoutSettings["Vibe0_CHANNEL"]);
+    setPinChannel("Vibe1_CHANNEL", pinoutSettings["Vibe1_CHANNEL"]);
+    setPinChannel("Vibe2_CHANNEL", pinoutSettings["Vibe2_CHANNEL"]);
+    setPinChannel("Vibe3_CHANNEL", pinoutSettings["Vibe3_CHANNEL"]);
+    setPinChannel("ValveServo_CHANNEL", pinoutSettings["ValveServo_CHANNEL"]);
+    setPinChannel("TwistServo_CHANNEL", pinoutSettings["TwistServo_CHANNEL"]);
+    setPinChannel("Squeeze_CHANNEL", pinoutSettings["Squeeze_CHANNEL"]);
+    setPinChannel("Heater_CHANNEL", pinoutSettings["Heater_CHANNEL"]);
+    setPinChannel("Case_Fan_CHANNEL", pinoutSettings["Case_Fan_CHANNEL"]);
+    validatePwmDriverContention();
+    // After every (re)render, re-paint pin error overlays from the latest
+    // PwmManager failure table snapshot (carried in systemInfo).
+    applyPwmAttachErrorHighlights();
+}
+function setUserSettings()
 {
     document.getElementById('TCodeVersion').value = userSettings["TCodeVersion"];
+    setLogLevelUI();
     toggleNonTCodev3Options();
-    toggleDeviceOptions(userSettings["sr6Mode"]);
-    toggleStaticIPSettings(userSettings["staticIP"]);
-    togglePitchServoFrequency(userSettings["pitchFrequencyIsDifferent"]);
+    toggleDeviceOptions(userSettings["deviceType"]);
     toggleFeedbackTwistSettings(userSettings["feedbackTwist"]);
     toggleBatterySettings(userSettings["batteryLevelEnabled"]);
     MotionGenerator.setEnabledStatus();
@@ -624,47 +1273,29 @@ function setUserSettings()
     // updateRangePercentageLabel("xRoll", tcodeToPercentage(xRollMin), tcodeToPercentage(xRollMax));
 
     //updateSpeedUI(userSettings["speed"]);
-    
-    document.getElementById('boardType').value = userSettings["boardType"];
 
-    document.getElementById("udpServerPort").value = userSettings["udpServerPort"];
-    document.getElementById("webServerPort").value = userSettings["webServerPort"];
-    startUpWebPort = userSettings["webServerPort"];
-    document.getElementById("hostname").value = userSettings["hostname"];
-    startUpHostName = userSettings["hostname"];
-    document.getElementById("friendlyName").value = userSettings["friendlyName"];
-	document.getElementById("servoFrequency").value = userSettings["servoFrequency"];
-	document.getElementById("pitchFrequency").value = userSettings["pitchFrequency"];
-	document.getElementById("valveFrequency").value = userSettings["valveFrequency"];
-	document.getElementById("twistFrequency").value = userSettings["twistFrequency"];
-    document.getElementById("squeezeFrequency").value = userSettings.squeezeFrequency,
-	document.getElementById("msPerRad").value = userSettings["msPerRad"];
-	
+    document.getElementById('boardType').value = userSettings["boardType"];
+    const isSSR1PCB = isBoardType(BoardType.SSR1PCB);
+    const deviceTypeElement = document.getElementById("deviceType");
+	deviceTypeElement.value = userSettings["deviceType"];
+    deviceTypeElement.disabled = isBoardType(BoardType.CRIMZZON) || isBoardType(BoardType.ISAAC) || isSSR1PCB;
+    if(userSettings.deviceType == DeviceType.NONE) {
+        deviceTypeElement.classList.add("pulse-yellow");
+    } else {
+        deviceTypeElement.classList.remove("pulse-yellow");
+    }
+	document.getElementById("maxServoRange").value = userSettings["maxServoRange"];
+
 	document.getElementById("feedbackTwist").checked = userSettings["feedbackTwist"];
 	document.getElementById("continuousTwist").checked = userSettings["continuousTwist"];
 	document.getElementById("analogTwist").checked = userSettings["analogTwist"];
-    
-    document.getElementById("TwistFeedBack_PIN").value = userSettings["TwistFeedBack_PIN"];
-    document.getElementById("RightServo_PIN").value = userSettings["RightServo_PIN"];
-    document.getElementById("LeftServo_PIN").value = userSettings["LeftServo_PIN"];
-    document.getElementById("RightUpperServo_PIN").value = userSettings["RightUpperServo_PIN"];
-    document.getElementById("LeftUpperServo_PIN").value = userSettings["LeftUpperServo_PIN"];
-    document.getElementById("PitchLeftServo_PIN").value = userSettings["PitchLeftServo_PIN"];
-    document.getElementById("PitchRightServo_PIN").value = userSettings["PitchRightServo_PIN"];
-    document.getElementById("ValveServo_PIN").value = userSettings["ValveServo_PIN"];
-	document.getElementById("TwistServo_PIN").value = userSettings["TwistServo_PIN"];
-    document.getElementById("Vibe0_PIN").value = userSettings["Vibe0_PIN"];
-    document.getElementById("Vibe1_PIN").value = userSettings["Vibe1_PIN"];
-    document.getElementById("Vibe2_PIN").value = userSettings["Vibe2_PIN"];
-    document.getElementById("Vibe3_PIN").value = userSettings["Vibe3_PIN"];
-	document.getElementById("LubeButton_PIN").value = userSettings["LubeButton_PIN"];
-	document.getElementById("Squeeze_PIN").value = userSettings["Squeeze_PIN"];
 
-    if(systemInfo.motorType === MotorType.BLDC) 
+    ESPTimer.setup();
+    if(systemInfo.motorType === MotorType.BLDC)
         BLDCMotor.setup();
 
 	Buttons.setup();
-    
+
     document.getElementById("RightServo_ZERO").value = userSettings["RightServo_ZERO"];
     document.getElementById("LeftServo_ZERO").value = userSettings["LeftServo_ZERO"];
     document.getElementById("RightUpperServo_ZERO").value = userSettings["RightUpperServo_ZERO"];
@@ -676,12 +1307,15 @@ function setUserSettings()
 	document.getElementById("Squeeze_ZERO").value = userSettings["Squeeze_ZERO"];
 	document.getElementById("lubeEnabled").checked = userSettings["lubeEnabled"];
 	document.getElementById("lubeAmount").value = userSettings["lubeAmount"];
-	document.getElementById("sr6Mode").checked = userSettings["sr6Mode"];
+	document.getElementById("lubeButtonPinMode").value = userSettings["lubeButtonPinMode"] != null ? userSettings["lubeButtonPinMode"] : 0;
+	document.getElementById("deviceType").value = userSettings["deviceType"];
 	document.getElementById("autoValve").checked = userSettings["autoValve"];
 	document.getElementById("inverseValve").checked = userSettings["inverseValve"];
 	document.getElementById("valveServo90Degrees").checked = userSettings["valveServo90Degrees"];
 	document.getElementById("inverseStroke").checked = userSettings["inverseStroke"];
 	document.getElementById("inversePitch").checked = userSettings["inversePitch"];
+	document.getElementById("inverseTwist").checked = userSettings["inverseTwist"];
+
 
 	document.getElementById("displayEnabled").checked = userSettings["displayEnabled"];
 	document.getElementById("sleeveTempDisplayed").checked = userSettings["sleeveTempDisplayed"];
@@ -689,10 +1323,9 @@ function setUserSettings()
 	document.getElementById("versionDisplayed").checked = userSettings["versionDisplayed"];
 	document.getElementById("tempSleeveEnabled").checked = userSettings["tempSleeveEnabled"];
     document.getElementById('tempInternalEnabled').checked = userSettings["tempInternalEnabled"];
-	document.getElementById("pitchFrequencyIsDifferent").checked = userSettings["pitchFrequencyIsDifferent"];
 	document.getElementById("Display_Screen_Width").value = userSettings["Display_Screen_Width"];
 	document.getElementById("Display_Screen_Height").value = userSettings["Display_Screen_Height"];
-    
+
     if(userSettings["Display_Screen_Height"] == 32) {
         document.getElementById('displayIs32Px').checked = true;
     }
@@ -701,41 +1334,27 @@ function setUserSettings()
 	document.getElementById("HoldPWM").value = userSettings["HoldPWM"];
 	document.getElementById("Display_I2C_Address").value = userSettings["Display_I2C_Address"];
     document.getElementById("Display_I2C_Address_text").value = userSettings["Display_I2C_Address"];
-	// document.getElementById("Display_Rst_PIN").value = userSettings["Display_Rst_PIN"];
-	document.getElementById("Temp_PIN").value = userSettings["Temp_PIN"];
-	document.getElementById("Heater_PIN").value = userSettings["Heater_PIN"];
 	// document.getElementById("heaterFailsafeTime").value = userSettings["heaterFailsafeTime"];
+    // PWM resolution is now picked automatically by the PwmManager based on
+    // the requested timer frequency, so the per-channel resolution UI fields
+    // are no longer populated from settings.
 	document.getElementById("heaterThreshold").value = userSettings["heaterThreshold"];
-	document.getElementById("heaterResolution").value = userSettings["heaterResolution"];
-	document.getElementById("heaterFrequency").value = userSettings["heaterFrequency"];
-	
-    setWifiSettings();
-    document.getElementById("staticIP").checked = userSettings["staticIP"];
-    startUpStaticIP = userSettings["staticIP"];
-    document.getElementById("localIPInput").value = userSettings["localIP"];
-    startUpLocalIP = userSettings["localIP"];
-    document.getElementById("gatewayInput").value = userSettings["gateway"];
-    document.getElementById("subnetInput").value = userSettings["subnet"];
-    document.getElementById("dns1Input").value = userSettings["dns1"];
-    document.getElementById("dns2Input").value = userSettings["dns2"];
-    //document.getElementById('bluetoothEnabled').checked = userSettings["bluetoothEnabled"];
-    
+
 	// document.getElementById("Display_Rst_PIN").readOnly = newtoungeHatExists;
 
 	document.getElementById("Display_Screen_Width").readOnly = true;
 	document.getElementById("Display_Screen_Height").readOnly = true;
-	// document.getElementById("Display_Rst_PIN").readOnly = true;
-    document.getElementById('Internal_Temp_PIN').value = userSettings["Internal_Temp_PIN"];
     document.getElementById('fanControlEnabled').checked = userSettings["fanControlEnabled"];
     document.getElementById('internalTempForFan').value = userSettings["internalTempForFan"];
     document.getElementById('internalMaxTemp').value = userSettings["internalMaxTemp"];
-    document.getElementById('Case_Fan_PIN').value = userSettings["Case_Fan_PIN"];
-    document.getElementById('caseFanResolution').value = userSettings["caseFanResolution"];
-    document.getElementById('caseFanFrequency').value = userSettings["caseFanFrequency"];
+    document.getElementById('caseFanMaxPWM').value = userSettings["caseFanMaxPWM"];
+
+    document.getElementById('vibTimeout').value = userSettings["vibTimeout"];
+    document.getElementById('vibTimeoutEnabled').checked = userSettings["vibTimeoutEnabled"];
 
     batterySetup();
-    
-    document.getElementById('debug').value = userSettings["logLevel"];
+
+    document.getElementById('logLevel').value = userSettings["logLevel"];
 
     var includedElement = document.getElementById('log-include-tags');
     for (var i = 0; i < includedElement.options.length; i++) {
@@ -745,17 +1364,18 @@ function setUserSettings()
     for (var i = 0; i < excludedElement.options.length; i++) {
         excludedElement.options[i].selected = userSettings["log-exclude-tags"].indexOf(excludedElement.options[i].value) >= 0;
     }
-    
+
     document.getElementById('voiceEnabled').checked = userSettings['voiceEnabled'];
     document.getElementById('voiceMuted').checked = userSettings['voiceMuted'];
     document.getElementById('voiceVolume').value = userSettings['voiceVolume'];
     document.getElementById('voiceWakeTime').value = userSettings['voiceWakeTime'];
 
     setupChannelSliders();
-    
+
     documentLoaded = true;
     //document.getElementById('debugLink').hidden = !userSettings["debug"];
 }
+
 function removeAllChildren(element) {
     if(!element) {
         return;
@@ -788,7 +1408,7 @@ function removeByClass(name) {
     }
     while(nodes[0]) {
         nodes[0].parentNode.removeChild(nodes[0]);
-    }​
+    }
 }
 
 function hasFeature(buildFeature) {
@@ -801,16 +1421,13 @@ function toggleBuildOptions() {
     Utils.toggleControlVisibilityByID('sleeveTempDisplayedRow',  hasTemp && userSettings["tempSleeveEnabled"]);
 
     Utils.toggleControlVisibilityByClassName('build_display', hasFeature(BuildFeature.DISPLAY_));
-        
+
     var tcodeVersionElement = document.getElementById('TCodeVersion');
 
-    if(!hasTCodeV2()) {
-        availableVersions.splice(availableVersions.findIndex(x => x.version === TCodeVersion.V2), 1);
-    }
-    availableVersions.forEach(x => {
+    tcodeVersions.forEach(x => {
         const optionElement = document.createElement("option");
-        optionElement.value=x.version;
-        optionElement.innerText=x.versionName;
+        optionElement.value=x.value;
+        optionElement.innerText=x.name;
         tcodeVersionElement.appendChild(optionElement);
     });
 }
@@ -823,11 +1440,16 @@ function toggleMotorTypeOptions() {
     }
 }
 
-function updateUserSettings(debounceInMs, uri, objectToSave, callback) 
+function toggleBLDCEncoderOptions() {
+    Utils.toggleControlVisibilityByClassName("BLDCPWM", userSettings["BLDC_Encoder"] == BLDCEncoderType.PWM);
+    Utils.toggleControlVisibilityByClassName("BLDCSPI", isBLDCSPI());
+}
+
+function updateUserSettings(debounceInMs, uri, objectToSave, callback)
 {
     if (documentLoaded) {
         if(debounceInMs == null || debounceInMs == undefined) {
-            debounceInMs = 3000;
+            debounceInMs = defaultDebounce;
         }
         if(!uri) {
             uri = "/settings"
@@ -835,39 +1457,43 @@ function updateUserSettings(debounceInMs, uri, objectToSave, callback)
         if(!objectToSave) {
             objectToSave = userSettings;
         }
-        if(upDateTimeout !== null) 
+        if(upDateTimeout !== null)
         {
             clearTimeout(upDateTimeout);
         }
-        upDateTimeout = setTimeout(() => 
+        upDateTimeout = setTimeout(() =>
         {
             checkRestartRedirect();
-            
+
             showInfo("Saving...");
             var xhr = new XMLHttpRequest();
             var response = {};
             xhr.open("POST", uri, true);
-            xhr.onreadystatechange = function() 
+            xhr.onreadystatechange = function()
             {
-                if (xhr.readyState === 4) 
+                if (xhr.readyState === 4)
 				{
-                    if(xhr.responseText === '')
+                    if(!xhr.responseText.length)
                     {
                         response["msg"] = xhr.status + ': ' + xhr.statusText;
                     }
-                    else 
+                    else if(xhr.responseText.startsWith("{"))
                     {
                         response = JSON.parse(xhr.responseText);
                     }
-                    if (response["msg"] !== "done") 
+                    else
+                    {
+                        response["msg"] = xhr.responseText;
+                    }
+                    if (response["msg"] !== "done")
                     {
                         hideInfo();
                         showError("Error saving: " + response["msg"]);
                         getUserSettings();
-                    } 
-                    else 
+                    }
+                    else
                     {
-                        if (restartRequired) 
+                        if (restartRequired)
                         {
                             showRestartRequired();
                         }
@@ -882,14 +1508,13 @@ function updateUserSettings(debounceInMs, uri, objectToSave, callback)
             xhr.setRequestHeader('Content-Type', 'application/json');
             var body = JSON.stringify(objectToSave);
             xhr.send(body);
-            upDateTimeout = null;
         }, debounceInMs);
     }
 }
 
 function checkRestartRedirect() {
-    // if(startUpWebPort !== userSettings["webServerPort"] || 
-    //     startUpHostName !== userSettings["hostname"] || 
+    // if(startUpWebPort !== userSettings["webServerPort"] ||
+    //     startUpHostName !== userSettings["hostname"] ||
     //     startUpStaticIP !== userSettings["staticIP"] ||
     //     startUpLocalIP !== userSettings["localIP"]) {
     //     restartingAndChangingAddress = true;
@@ -904,13 +1529,13 @@ function checkRestartRedirect() {
         } else {// Connect to wifi configuration
             //Uri change
             const isPort80 = window.location.port.length == 0;
-            const isUserPort80 = userSettings["webServerPort"] == 80;
+            const isUserPort80 = wifiSettings["webServerPort"] == 80;
             const port80Changed = isPort80 && !isUserPort80 || !isPort80 && isUserPort80;
-            const portChanged = port80Changed || (!isPort80 && window.location.port != userSettings["webServerPort"]);
-            const connectedAndPortChanged = !systemInfo.apMode && portChanged; 
+            const portChanged = port80Changed || (!isPort80 && window.location.port != wifiSettings["webServerPort"]);
+            const connectedAndPortChanged = !systemInfo.apMode && portChanged;
             //Not using IP address and hostname change
             const isCurrentIPAddress = isValidIP(window.location.hostname);
-            const connectedAndHostnameChanged = !isCurrentIPAddress && !systemInfo.apMode && window.location.hostname != userSettings["hostname"];
+            const connectedAndHostnameChanged = !isCurrentIPAddress && !systemInfo.apMode && window.location.hostname != wifiSettings["hostname"];
 
             if(connectedAndPortChanged || connectedAndHostnameChanged) {
                 restartingAndChangingAddress = true;
@@ -922,7 +1547,9 @@ function checkRestartRedirect() {
 function isValidIP(ip) {
     return ip && ip.match(/^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/);
 }
-
+function isValidHostName(hostname) {
+    return hostname && hostname.match(/^(?![0-9]+$)(?!.*-$)(?!-)[a-zA-Z0-9-_]{1,63}$/g)
+}
 function showRestartRequired() {
     //document.getElementById('requiresRestart').hidden = false;
     document.getElementById('resetBtn').classList.add("restart-required");
@@ -956,27 +1583,42 @@ function toggleMenu() {
     menu.classList.toggle("menu-hidden");
     menu.classList.toggle("menu-shown");
 }
-function clearErrors(name) 
+function clearErrors(name)
 {
     var errorText = document.getElementById("errorText");
-    var errors = document.getElementsByName(name);
-    for(var i=0;i<errors.length;i++) {
-        errorText.removeChild(errors[i]);
+    if(name) {
+        var errors = document.getElementsByName(name);
+        for(var i=0;i<errors.length;i++) {
+            errorText.removeChild(errors[i].parentNode);
+        }
+        errors = document.getElementsByName("errorItem");
+        if(!errors.length) {
+            document.getElementById("errorMessage").hidden = true;
+        }
     }
-    if(errorText.innerText == "" && !errorText.firstChild) {
-        closeError();
-    }
+    // else {
+    //     closeError();
+    // }
 }
 
-function closeError() 
+function closeError()
 {
-    document.getElementById("errorText").innerHTML = "";
+    var errorText = document.getElementById("errorText");
+    removeAllChildren(errorText);
     document.getElementById("errorMessage").hidden = true;
 }
 
-function showError(message) 
+function showError(message, name)
 {
-    document.getElementById("errorText").innerHTML += message;
+    var div = document.createElement("div");
+    if(name !== undefined) {
+        var errorString = `<div name='${name}'>${message}</div>`;
+
+        message = errorString;
+    }
+    div.setAttribute("name", "errorItem");
+    div.innerHTML = message;
+    document.getElementById("errorText").appendChild(div);
     document.getElementById("errorMessage").hidden = false;
 }
 
@@ -1026,20 +1668,58 @@ function hideInfo() {
 }
 
 function sendWebsocketCommand(command, message) {
+    if(!isWebSocketConnected()) {
+        startServerPoll();
+        return;
+    }
     websocket.send("{\"command\":\""+command+"\", \"message\": \""+message+"\"}")
 }
 
 function sendTCode(tcode) {
+    if(!isWebSocketConnected()) {
+        startServerPoll();
+        return;
+    }
     websocket.send(tcode+String.fromCharCode(10))
 }
 
+// Briefly move a single physical servo to identify it.
+// Sends a firmware-side command so only the specific servo moves (±100µs from zero).
+function identifyServo(servoName) {
+    if (!isWebSocketConnected()) {
+        alert("Not connected to device.");
+        return;
+    }
+    // Disable all identify buttons for 2.5 s to prevent overlapping commands
+    var buttons = document.querySelectorAll('.formButton[onclick^="identifyServo"]');
+    buttons.forEach(function(btn) { btn.disabled = true; });
+    setTimeout(function() {
+        buttons.forEach(function(btn) { btn.disabled = false; });
+    }, 2500);
+    sendWebsocketCommand("identifyServo", servoName);
+}
+
+function sendTCodeValue(channelName, value, tcodeModifierType, modifierValue) {
+    var tcode = getTCodeValue(channelName, value, tcodeModifierType, modifierValue)
+    sendTCode(tcode);
+}
+
+function getTCodeValue(channelName, value, tcodeModifierType, modifierValue) {
+    var tcode = channelName + value.toString().padStart(4, "0");
+    if(tcodeModifierType) {
+        tcode += tcodeModifierType
+        tcode += modifierValue;
+    }
+    return tcode;
+}
+
 function sendDeviceHome() {
-    channelSliderList.forEach(x => x.value = x.channelModel.switch ? 0 : 50);
+    channelSliderList.forEach(x => x.value = x.channelModel.isSwitch ? 0 : 50);
     var availibleChannels = getChannelMap();
     var tcode = "";
     availibleChannels.forEach((element, index, array) => {
-        tcode += getSliderTCode(element.channel, element.switch ? 0 : 50, false, 1000, false);
-        if (index !== array.length - 1){ 
+        tcode += getSliderTCode(element.name, element.isSwitch ? 0 : 50, false, 1000, false);
+        if (index !== array.length - 1){
             tcode += " ";
         }
     });
@@ -1048,20 +1728,19 @@ function sendDeviceHome() {
 
 function getSliderTCode(channel, sliderValue, useIModifier, modifierValue, disableModifier) {
     var value = percentageToTcode(sliderValue);
-    var tcode = channel + value.toString().padStart(isTCodeV3() ? 4 : 3, "0");
-    if(!disableModifier) {
-        tcode += useIModifier ? "I" : "S"
-        tcode += modifierValue;
+    if(disableModifier) {
+        return getTCodeValue(channel, value);
     }
-    return tcode;
+    return getTCodeValue(channel, value, useIModifier ? TCodeModifierType.INTERVAL : TCodeModifierType.SPEED, modifierValue);
 }
-function setupChannelSliders() 
+
+function setupChannelSliders()
 {
     var channelTestsNode = document.getElementById("channelTestsTable");
     deleteAllChildren(channelTestsNode);
     var bodyNode = document.createElement("div");
     channelTestsNode.appendChild(bodyNode);
-    
+
     var headerRowNode = document.createElement("div");
     var headerCellNode = document.createElement("div");
     headerCellNode.classList.add("tHeader");
@@ -1087,11 +1766,11 @@ function setupChannelSliders()
     var availibleChannels = getChannelMap();
     for(var i=0; i<availibleChannels.length;i++)
     {
-        if(!userSettings.sr6Mode && availibleChannels[i].sr6Only) {
+        if(!isSR6() && availibleChannels[i].sr6Only) {
             continue;
         }
-        var channel = availibleChannels[i].channel;
-        var channelName = availibleChannels[i].channelName;
+        var channel = availibleChannels[i].name;
+        var channelName = availibleChannels[i].friendlyName;
 
         var rowNode = document.createElement("div");
         rowNode.classList.add("tRow");
@@ -1109,7 +1788,7 @@ function setupChannelSliders()
         sliderNode.min = 0;
         sliderNode.max = 99;
         sliderNode.channelModel = availibleChannels[i];
-        sliderNode.value = availibleChannels[i].switch ? 0 : 50;
+        sliderNode.value = availibleChannels[i].isSwitch ? 0 : 50;
         sliderNode.addEventListener("input", function (sliderNode, channel, channelName, feedbackCellNode) {
             var tcode = getSliderTCode(channel, sliderNode.value, testDeviceUseIModifier, testDeviceModifierValue, testDeviceDisableModifier);
             sendTCode(tcode);
@@ -1157,7 +1836,7 @@ function setupChannelSliders()
     testDeviceUseIModifierRowNode.appendChild(testDeviceUseIModifierCellNode);
     testDeviceUseIModifierRowNode.appendChild(testDeviceUseIModifierInputCellNode);
     bodyNode.appendChild(testDeviceUseIModifierRowNode);
-    
+
     var testDeviceDisableModifierNode = document.createElement("input");
     testDeviceDisableModifierNode.type = "checkbox"
     testDeviceDisableModifierNode.checked = testDeviceDisableModifier;
@@ -1176,7 +1855,7 @@ function setupChannelSliders()
     testDeviceDisableModifierRowNode.appendChild(testDeviceDisableModifierInputCellNode);
     bodyNode.appendChild(testDeviceDisableModifierRowNode);
 
-    
+
     var testDeviceHomeNode = document.createElement("button");
     testDeviceHomeNode.addEventListener("click", (event) => {
         sendDeviceHome();
@@ -1208,17 +1887,14 @@ function hasTCodeV2()  {
     return hasFeature(BuildFeature.HAS_TCODE_V2);
 }
 function getTCodeMax() {
-    return isTCodeV3() ? 9999 : 999;
+    return 9999;
+}
+function getTCodeMin() {
+    return 0;
 }
 function getChannelMap() {
-    return systemInfo["motorType"] == MotorType.Servo ? isTCodeV3() ? AvailibleChannelsV3 : AvailibleChannelsV2 : AvailibleChannelsBLDC;
+    return systemInfo["availableChannels"]
 };
-function onChannelSliderInput(channel, value) {
-    sendTCode(channel+value.toString().padStart(isTCodeV3() ? 4 : 3, "0") + "S1000");
-}
-function getTCodeMax() {
-    return isTCodeV3() ? 9999 : 999
-}
 function tcodeToPercentage(tcodeValue) {
     return convertRange(0, getTCodeMax(), 0, 99, tcodeValue);
 }
@@ -1237,100 +1913,42 @@ function onSpeedInput() {
 }
 
 function updateUdpPort() {
-    userSettings["udpServerPort"] = parseInt(document.getElementById('udpServerPort').value);
+    wifiSettings["udpServerPort"] = parseInt(document.getElementById('udpServerPort').value);
     setRestartRequired();
-    updateUserSettings();
+    postWifiSettings();
 }
 
 function updateWebPort() {
-    userSettings["webServerPort"] = parseInt(document.getElementById('webServerPort').value);
+    wifiSettings["webServerPort"] = parseInt(document.getElementById('webServerPort').value);
     setRestartRequired();
-    updateUserSettings();
+    postWifiSettings();
 }
 
-function setPitchFrequencyIsDifferent() {
-    var isChecked = document.getElementById('pitchFrequencyIsDifferent').checked;
-    userSettings["pitchFrequencyIsDifferent"] = isChecked;
-    togglePitchServoFrequency(isChecked);
-}
-
-function updateServoFrequency() {
-    var servoFrequencyControl = document.getElementById('servoFrequency');
-    if(!servoFrequencyControl.checkValidity()) {
-        showError(servoFrequencyControl.validationMessage);
-    } else
-        userSettings["servoFrequency"] = parseInt(servoFrequencyControl.value);
-        
-    var pitchFrequencyControl = document.getElementById('pitchFrequency');
-    if(!pitchFrequencyControl.checkValidity()) {
-        showError(pitchFrequencyControl.validationMessage);
-    } else
-        userSettings["pitchFrequency"] = parseInt(pitchFrequencyControl.value);
-
-    var valveFrequencyControl = document.getElementById('valveFrequency');
-    if(!valveFrequencyControl.checkValidity()) {
-        showError(valveFrequencyControl.validationMessage);
-    } else
-        userSettings["valveFrequency"] = parseInt(valveFrequencyControl.value);
-
-    var twistFrequencyControl = document.getElementById('twistFrequency');
-    if(!twistFrequencyControl.checkValidity()) {
-        showError(twistFrequencyControl.validationMessage);
-    } else
-        userSettings["twistFrequency"] = parseInt(twistFrequencyControl.value);
-        var twistFrequencyControl = document.getElementById('twistFrequency');
-
-    var squeezeFrequencyControl = document.getElementById('squeezeFrequency');
-    if(!squeezeFrequencyControl.checkValidity()) {
-        showError(squeezeFrequencyControl.validationMessage);
-    } else
-        userSettings["squeezeFrequency"] = parseInt(squeezeFrequencyControl.value);
-    setRestartRequired();
-    updateUserSettings();
-}
-function updateMSPerRad(userChecked) {
-    var control = document.getElementById('msPerRad');
-    if(!control.checkValidity()) {
-        showError(control.validationMessage);
-        return false;
-    }
-    userSettings["msPerRad"] = parseInt(control.value);
-    if(!userChecked) {
-        document.getElementById('msPerRadIs270').checked = userSettings["msPerRad"] == servoDegreeValue270;
-    }
-    setRestartRequired();
-    updateUserSettings();
+function updateMaxServoRange() {
+    debounceInput("maxServoRange", () => {
+        var control = document.getElementById('maxServoRange');
+        if(!validateIntControl(control, userSettings, "maxServoRange")) {
+            return false;
+        }
+        setRestartRequired();
+        updateUserSettings(0);
+    });
     return true;
-}
-
-function toggleMsPerRadIs270() {
-    var control = document.getElementById('msPerRad');
-    var msPerRadIs270Checkbox = document.getElementById('msPerRadIs270');
-    const backupvalue = control.value;
-    if(msPerRadIs270Checkbox.checked) {
-        control.value = servoDegreeValue270;//270 degree servo.
-    } else {
-        control.value = servoDegreeValue180;
-    }
-    if(!updateMSPerRad(true)) {
-        msPerRadIs270Checkbox.checked = !msPerRadIs270Checkbox.checked;
-        control.value = backupvalue;
-    }
 }
 
 function updateContinuousTwist() {
 	var checked = document.getElementById('continuousTwist').checked;
-	if (checked) 
+	if (checked)
 	{
-		if (confirm("WARNING! If you enable continuous twist\nMAKE SURE THERE ARE NO WIRES CONNECTED TO YOUR FLESHLIGHT CASE!\nThis can twist the wires and possible injury can occur.\n CONFIRM THERE ARE NO WIRES CONNECTED?")) 
+		if (confirm("WARNING! If you enable continuous twist\nMAKE SURE THERE ARE NO WIRES CONNECTED TO YOUR FLESHLIGHT CASE!\nThis can twist the wires and possible injury can occur.\n CONFIRM THERE ARE NO WIRES CONNECTED?"))
 		{
 			userSettings["continuousTwist"] = checked;
 			updateUserSettings();
-		} 
-		else 
+		}
+		else
 		{
 			document.getElementById('continuousTwist').checked = false;
-		} 
+		}
 	}
 	else
 	{
@@ -1341,19 +1959,19 @@ function updateContinuousTwist() {
 function updateAnalogTwist() {
 	var checked = document.getElementById('analogTwist').checked;
     userSettings["analogTwist"] = checked;
-    
+
     if(checked ) {
         document.getElementById("TwistFeedBack_PIN").value = 32;
-        userSettings["TwistFeedBack_PIN"] = 32;
+        pinoutSettings["TwistFeedBack_PIN"] = 32;
         //if(!newtoungeHatExists)
         alert("Note, twist feedback pin has been changed to analog input pin 32.\nPlease adjust your hardware accordingly.");
     } else {
         document.getElementById("TwistFeedBack_PIN").value = 26;
-        userSettings["TwistFeedBack_PIN"] = 26;
+        pinoutSettings["TwistFeedBack_PIN"] = 26;
         alert("Note, twist feedback pin reset to 26.\nPlease adjust your hardware accordingly.");
     }
     setRestartRequired();
-    updateUserSettings();
+    postAndValidatePinoutSettings(defaultDebounce, postCommonSettings);
 }
 function updateFeedbackTwist() {
     var checked = document.getElementById('feedbackTwist').checked;
@@ -1367,48 +1985,181 @@ function toggleFeedbackTwistSettings(feedbackChecked) {
     var feedbackTwistOnly = document.getElementsByClassName('feedbackTwistOnly');
     for(var i=0;i < feedbackTwistOnly.length; i++)
         feedbackTwistOnly[i].style.display = feedbackChecked ? "flex" : "none";
-        
+
     if(feedbackChecked && !isTCodeV3()) {
         document.getElementById("analogTwistRow").style.display = 'none';
     }
 }
-function updateHostName() 
+function updateHostName()
 {
-    userSettings["hostname"] = document.getElementById('hostname').value;
-    setRestartRequired();
-    updateUserSettings();
+    if(hostnameTimeout !== null)
+    {
+        clearTimeout(hostnameTimeout);
+    }
+    hostnameTimeout = setTimeout(() =>
+    {
+        clearErrors("hostnameValidation");
+        let value = document.getElementById('hostname').value;
+        if(isValidHostName(value))
+        {
+            wifiSettings["hostname"] = value;
+            setRestartRequired();
+            postWifiSettings(0);
+        } else {
+            var errorString = "<div name='hostnameValidation'>Invalid hostname</div>";
+
+            // errorString += "</div>";
+            showError(errorString);
+        }
+        hostnameTimeout = null;
+    }, defaultDebounce);
 }
 
-function updateFriendlyName() 
+function updateFriendlyName()
 {
-    userSettings["friendlyName"] = document.getElementById('friendlyName').value;
+    wifiSettings["friendlyName"] = document.getElementById('friendlyName').value;
     setRestartRequired();
-    updateUserSettings();
+    postWifiSettings();
 }
+
+// These encoder functions could be removed in the future if multiple encoders are added
+function setEncoderType() {
+    const element = document.getElementById("BLDC_Encoder");
+    userSettings["BLDC_Encoder"] = parseInt(element.value);
+    toggleBLDCEncoderOptions();
+    if(userSettings.BLDC_Encoder != BLDCEncoderType.NONE)
+    {
+        element.classList.remove("pulse-yellow");
+    }
+    else
+    {
+        element.classList.add("pulse-yellow");
+    }
+    setRestartRequired();
+    updateUserSettings(0);
+}
+function updateBLDCUseHallSensor() {
+    userSettings["BLDC_UseHallSensor"] = document.getElementById("BLDC_UseHallSensor").checked;
+    Utils.toggleControlVisibilityByClassName("hallEffect", userSettings["BLDC_UseHallSensor"]);
+    if(validatePins())
+    {
+        setRestartRequired();
+        updateUserSettings();
+    }
+}
+function updateBLDCTwistSettings() {
+    Utils.debounce("updateBLDCTwistSettings", () => {
+        if(validateFloatControl("BLDC_TwistMultiplier", userSettings, "BLDC_TwistMultiplier") &&
+            validateFloatControl("BLDC_TwistLimit", userSettings, "BLDC_TwistLimit")
+        ) {
+            updateUserSettings(0);
+        }
+    }, defaultDebounce);
+}
+function updateBLDCSettings() {
+    Utils.debounce("updateBLDCSettings", () => {
+        if(validateIntControl("BLDC_RailLength", userSettings, "BLDC_RailLength") &&
+            validateIntControl("BLDC_StrokeLength", userSettings, "BLDC_StrokeLength") &&
+            validateFloatControl("BLDC_LowPassFilter", userSettings, "BLDC_LowPassFilter") &&
+            validateFloatControl("BLDC_PIDProportionalConstant", userSettings, "BLDC_PIDProportionalConstant")
+        ) {
+            setRestartRequired();
+            updateUserSettings(0);
+        }
+    }, defaultDebounce);
+}
+function toggleBLDCEncoderOptions() {
+    Utils.toggleControlVisibilityByClassName("BLDCPWM", userSettings["BLDC_Encoder"] == BLDCEncoderType.PWM);
+    Utils.toggleControlVisibilityByClassName("BLDCSPI", isBLDCSPI());
+}
+function setupEncoderTypes() {
+    const element = document.getElementById("BLDC_Encoder");
+    removeAllChildren(element);
+    for(let i=0;i<systemInfo.encoderTypes.length;i++) {
+        const option = document.createElement("option");
+        option.innerText = systemInfo.encoderTypes[i].name;
+        option.value = systemInfo.encoderTypes[i].value;
+        element.appendChild(option);
+        BLDCEncoderType[systemInfo.encoderTypes[i].name] = systemInfo.encoderTypes[i].value;
+    }
+}
+////////////////////////////////////////////////////////////////////////////////////////
 function setupBoardTypes() {
     const boardTypeElement = document.getElementById('boardType');
+    removeAllChildren(boardTypeElement);
     for(let i=0;i<systemInfo.boardTypes.length;i++) {
         const boardTypeOption = document.createElement("option");
         boardTypeOption.innerText = systemInfo.boardTypes[i].name;
         boardTypeOption.value = systemInfo.boardTypes[i].value;
         boardTypeElement.appendChild(boardTypeOption);
+        BoardType[systemInfo.boardTypes[i].name] = systemInfo.boardTypes[i].value;
     }
 }
 function setBoardType() {
     var element = document.getElementById('boardType');
-    var newBoardType = element.value;
-    if(confirm("This will reset the current pinout to default. Continue?")) {
-        setPinoutDefault(newBoardType);
+    if(confirm("This will reset the current pinout to default and you will need to restart the device. Continue?")) {
+        userSettings["boardType"] = parseInt(element.value);
+        const isSSR1PCB = isBoardType(BoardType.SSR1PCB);
+        document.getElementById("deviceType").disabled = isBoardType(BoardType.CRIMZZON) || isBoardType(BoardType.ISAAC) || isSSR1PCB;
+        document.getElementById("BLDC_Encoder").disabled = isSSR1PCB;
+        postBoardType(userSettings["boardType"]);
     } else {
         element.value = userSettings["boardType"];
     }
 }
-function setSR6Mode() {
-    userSettings["sr6Mode"] = document.getElementById('sr6Mode').checked;
-    toggleDeviceOptions(userSettings["sr6Mode"]);
-    setupChannelSliders();
-    setRestartRequired();
-	updateUserSettings(1);
+function setupDeviceTypes() {
+    const element = document.getElementById('deviceType');
+    removeAllChildren(element);
+    for(let i=0;i<systemInfo.deviceTypes.length;i++) {
+        const option = document.createElement("option");
+        option.innerText = systemInfo.deviceTypes[i].name;
+        option.value = systemInfo.deviceTypes[i].value;
+        element.appendChild(option);
+        DeviceType[systemInfo.deviceTypes[i].name] = systemInfo.deviceTypes[i].value;
+    }
+}
+function setDeviceType() {
+    var element = document.getElementById('deviceType');
+    let newValue = parseInt(element.value);// Parsed to int in the backend
+    if(confirm("This will reset the device specific settings to default and reboot. Continue?")) {
+        postDeviceType(newValue);
+    } else {
+        element.value = userSettings["deviceType"];
+    }
+    if(userSettings.deviceType != DeviceType.NONE)
+    {
+        element.classList.remove("pulse-yellow");
+    }
+    else
+    {
+        element.classList.add("pulse-yellow");
+    }
+}
+
+function setupTimerChannels() {
+    const elements = document.getElementsByName('timerChannels');
+    for (let index = 0; index < elements.length; index++) {
+        const element = elements[index];
+        removeAllChildren(element);
+        for(let i=0;i<systemInfo.timerChannels.length;i++) {
+            const ch = systemInfo.timerChannels[i];
+            const option = document.createElement("option");
+            // Relabel HIGH*/LOW* internal names as LEDC:N / MCPWM:N so the
+            // user sees what hardware actually drives the output. The
+            // "channel index" surfaced is per-driver (0..7) extracted from
+            // the trailing CH<n> suffix of the original channel name.
+            if (ch.value === -1 || ch.driver === undefined) {
+                option.innerText = ch.name; // "None"
+            } else {
+                const m = String(ch.name || '').match(/CH(\d+)/i);
+                const idx = m ? m[1] : ch.value;
+                const driverLabel = (ch.driver === ESPTimer.PwmDriver.MCPWM) ? "MCPWM" : "LEDC";
+                option.innerText = `${driverLabel}:${idx}`;
+            }
+            option.value = ch.value;
+            element.appendChild(option);
+        }
+    }
 }
 
 function setAutoValve() {
@@ -1421,17 +2172,17 @@ function setInverseValve() {
 }
 function setValveServo90Degrees() {
 	var checked = document.getElementById('valveServo90Degrees').checked;
-	if (checked) 
+	if (checked)
 	{
-		if (confirm("WARNING! If you 90 degree servo\nMAKE SURE YOU ARE NOT USING THE T-Valve LID!\nThe servo will stall hitting the wall and burn out!")) 
+		if (confirm("WARNING! If you 90 degree servo\nMAKE SURE YOU ARE NOT USING THE T-Valve LID!\nThe servo will stall hitting the wall and burn out!"))
 		{
 			userSettings["valveServo90Degrees"] = checked;
 			updateUserSettings();
-		} 
-		else 
+		}
+		else
 		{
 			document.getElementById('valveServo90Degrees').checked = false;
-		} 
+		}
 	}
 	else
 	{
@@ -1447,6 +2198,10 @@ function setInversePitch() {
     userSettings["inversePitch"] = document.getElementById('inversePitch').checked;
 	updateUserSettings();
 }
+function setInverseTwist() {
+    userSettings["inverseTwist"] = document.getElementById('inverseTwist').checked;
+	updateUserSettings();
+}
 function disablePinValidation() {
     if (!userSettings["disablePinValidation"] && confirm("This will disable ALL PIN validations.\nBe sure you know what you're doing!")) {
         userSettings["disablePinValidation"] = true;
@@ -1457,60 +2212,111 @@ function disablePinValidation() {
 	updateUserSettings();
 }
 
-function updatePins() 
+/**
+ * Toggle the "Advanced settings" UI mode. When off (default) the timer-
+ * channel selectors, PWM driver/frequency editor and manual reapply
+ * button are hidden — the firmware auto-allocates LEDC channels via
+ * PwmManager so end users only need to choose pins. State is persisted
+ * to localStorage and restored at next page load.
+ */
+function toggleAdvancedSettings() {
+    var cb = document.getElementById('advancedSettings');
+    var on = cb && cb.checked;
+    document.body.classList.toggle('advanced-mode', !!on);
+    try { localStorage.setItem('advancedMode', on ? '1' : '0'); } catch(e) {}
+}
+
+function setPinChannel(id, value) {
+    let element = document.getElementById(id);
+    element.value = value;
+    toggleEnableTimerChannels(element);
+}
+function onSelectPinChannel(element) {
+    pinoutSettings[element.id] = element.value;
+    // let option = selectElement.options[selectElement.selectedIndex];
+    // option.disabled = true
+    toggleEnableTimerChannels(element);
+    // Channel changes hot-swap via PwmManager (postPinoutSettings auto-fires
+    // /reapplyPwm). Only flag a restart if a non-hot-swap field changed —
+    // here that should never be true for a CHANNEL select, but the diff
+    // check keeps behaviour robust if the field set is later expanded.
+    if (pinChangeRequiresRestart()) {
+        setRestartRequired();
+    }
+	postPinoutSettings();
+    validatePwmDriverContention();
+}
+function toggleEnableTimerChannels(element) {
+    const timerSelects = document.getElementsByName('timerChannels');
+    for (let index = 0; index < timerSelects.length; index++) {
+        const otherElement = timerSelects[index];
+        if(element.id !== otherElement.id)
+            otherElement.options[element.selectedIndex].disabled = element.value > -1;
+    }
+}
+function updatePins()
 {
     if(systemInfo.motorType == MotorType.BLDC) {
         updateBLDCPins();
         return;
     }
-    if(upDateTimeout !== null) 
+    if(upDateTimeout !== null)
     {
         clearTimeout(upDateTimeout);
     }
-    upDateTimeout = setTimeout(() => 
+    upDateTimeout = setTimeout(() =>
     {
         var pinValues = validatePins();
         if(pinValues) {
-            userSettings["RightServo_PIN"] = pinValues.rightPin;
-            userSettings["LeftServo_PIN"] = pinValues.leftPin;
-            userSettings["RightUpperServo_PIN"] = pinValues.rightUpper;
-            userSettings["LeftUpperServo_PIN"] = pinValues.leftUpper;
-            userSettings["PitchLeftServo_PIN"] = pinValues.pitchLeft;
-            userSettings["PitchRightServo_PIN"] = pinValues.pitchRight;
+            if(systemInfo.motorType == MotorType.BLDC) {
+                motorA.updateBLDCPins(pinValues);
+                if(motorB)
+                    motorB.updateBLDCPins(pinValues);
+            } else {
+                pinoutSettings["RightServo_PIN"] = pinValues.rightPin;
+                pinoutSettings["LeftServo_PIN"] = pinValues.leftPin;
+                pinoutSettings["RightUpperServo_PIN"] = pinValues.rightUpper;
+                pinoutSettings["LeftUpperServo_PIN"] = pinValues.leftUpper;
+                pinoutSettings["PitchLeftServo_PIN"] = pinValues.pitchLeft;
+                pinoutSettings["PitchRightServo_PIN"] = pinValues.pitchRight;
+            }
             updateCommonPins(pinValues);
-            setRestartRequired();
-            updateUserSettings();
+            // Diff-based restart flag: only set when a non-hot-swap pin
+            // (BLDC, I2C, voltage monitor, temp, twist feedback, fan,
+            // heater, button-set, display reset) actually changed value.
+            // PWM-output pins/channels reapply live via PwmManager.
+            if (pinChangeRequiresRestart()) {
+                setRestartRequired();
+            }
+            postPinoutSettings(0);
         }
-    }, 2000);
+    }, defaultDebounce);
 }
 
 function updateCommonPins(pinValues) {
-    userSettings["TwistServo_PIN"] = pinValues.twistServo;
-    userSettings["ValveServo_PIN"] = pinValues.valveServo;
-    userSettings["Squeeze_PIN"] = pinValues.squeezeServo;
-    userSettings["Vibe0_PIN"] = pinValues.vibe0;
-    userSettings["Vibe1_PIN"] = pinValues.vibe1;
-    userSettings["Vibe2_PIN"] = pinValues.vibe2;
-    userSettings["Vibe3_PIN"] = pinValues.vibe3;
-    userSettings["LubeButton_PIN"] = pinValues.lubeButton;
-    if(userSettings.tempSleeveEnabled) {
-        userSettings["Heater_PIN"] = pinValues.heat;
-    }
-    if(userSettings.tempInternalEnabled) {
-        userSettings["Case_Fan_PIN"] = pinValues.caseFanPin;
-    }
-    if(userSettings.tempSleeveEnabled) {
-        userSettings["Temp_PIN"] = pinValues.temp;
-    }
-    if(userSettings.feedbackTwist) {
-        userSettings["TwistFeedBack_PIN"] = pinValues.twistFeedBack;
-    }
-    if(userSettings.tempInternalEnabled) {
-        userSettings["Internal_Temp_PIN"] = pinValues.internalTemp;
-    }
-    // if(userSettings.batteryLevelEnabled) {
-    //     userSettings["Battery_Voltage_PIN"] = pinValues.Battery_Voltage_PIN;
-    // }
+    pinoutSettings["TwistServo_PIN"] = pinValues.twistServo;
+    pinoutSettings["ValveServo_PIN"] = pinValues.valveServo;
+    pinoutSettings["Squeeze_PIN"] = pinValues.squeezeServo;
+    pinoutSettings["Vibe0_PIN"] = pinValues.vibe0;
+    pinoutSettings["Vibe1_PIN"] = pinValues.vibe1;
+    pinoutSettings["Vibe2_PIN"] = pinValues.vibe2;
+    pinoutSettings["Vibe3_PIN"] = pinValues.vibe3;
+    pinoutSettings["LubeButton_PIN"] = pinValues.lubeButton;
+    pinoutSettings["Heater_PIN"] = pinValues.heat;
+    pinoutSettings["Case_Fan_PIN"] = pinValues.caseFanPin
+    pinoutSettings["Temp_PIN"] = pinValues.temp;
+    pinoutSettings["TwistFeedBack_PIN"] = pinValues.twistFeedBack;
+    pinoutSettings["Internal_Temp_PIN"] = pinValues.internalTemp;
+    pinoutSettings["i2cSda_PIN"] = pinValues.i2cSda;
+    pinoutSettings["i2cScl_PIN"] = pinValues.i2cScl;
+    pinoutSettings["Voltage_3V3_PIN"] = pinValues.voltage3v3;
+    pinoutSettings["Voltage_5V_PIN"] = pinValues.voltage5v;
+    pinoutSettings["Voltage_Battery_PIN"] = pinValues.voltageBattery;
+    pinoutSettings["Voltage_Motor_PIN"] = pinValues.voltageMotor;
+    pinoutSettings["Voltage_Bus_PIN"] = pinValues.voltageBus;
+    if(systemInfo.motorType == MotorType.BLDC)
+        pinoutSettings["BLDC_HallEffect_PIN"] = pinValues.BLDC_HallEffect_PIN;
+    // pinoutSettings["Battery_Voltage_PIN"] = pinValues.Battery_Voltage_PIN;
 
 }
 // function updateNonPWMPins(assignedPins) {
@@ -1544,7 +2350,7 @@ function updateCommonPins(pinValues) {
 //             errors.push("Internal temp pin and "+assignedPins[pinDupeIndex].name);
 //         assignedPins.push({name:"Internal temp", pin:internalTemp});
 //     }
-    
+
 //     var twistFeedBack
 //     if(userSettings.feedbackTwist) {
 //         twistFeedBack = parseInt(document.getElementById('TwistFeedBack_PIN').value);
@@ -1588,114 +2394,186 @@ function setElementsIntMinAndMax(minElement, maxElement) {
     minElement.setAttribute('max', parseInt(maxElement.value) - 1);
     maxElement.setAttribute('min', parseInt(minElement.value) + 1);
 }
+
+/** Returns {valid: bool, control: HTLMNode | string, message: string} */
+function validateInput(controlIDOrElement) {
+    let control = controlIDOrElement;
+    if(typeof controlIDOrElement === "string") {
+        control = document.getElementById(controlIDOrElement);
+    }
+    if(control.checkValidity()) {
+        return {valid: true, control: control, message: message};
+    }
+    var message = control.validationMessage;
+    if(!message) {
+        message = control.errorText;
+    }
+    return {valid: false, control: control, message: message};
+}
+
 /** additionalValidations takes a parameter with the value */
-function validateIntControl(controlID, settingsObject, settingVariableName, additionalValidations) {
-    var control = document.getElementById(controlID);
-    if(additionalValidations && additionalValidations(control.value) || control.checkValidity()) {
+function validateIntControl(controlIDOrElement, settingsObject, settingVariableName, additionalValidations) {
+    const validObj = validateInput(controlIDOrElement);
+    const control = validObj.control;
+    clearErrors(control.id);
+    if(additionalValidations && additionalValidations(control.value) || validObj.valid) {
         settingsObject[settingVariableName] = parseInt(control.value);
         return true;
     }
-    showError(`${controlID} is invalid: ${control.errorText}`)
+    showError(`<div name="${control.id}"> ${control.id} is invalid: ${validObj.message ??  ""}</div>`);
     return false;
 }
-var validateFloatDebounce;
+
 /** additionalValidations takes a parameter with the value */
-function validateFloatControl(controlID, settingsObject, settingVariableName, additionalValidations) {
-    var control = document.getElementById(controlID);
-    if(additionalValidations && additionalValidations(control.value) || control.checkValidity()) {
+function validateFloatControl(controlIDOrElement, settingsObject, settingVariableName, additionalValidations) {
+    const validObj = validateInput(controlIDOrElement);
+    const control = validObj.control;
+    clearErrors(control.id);
+    if(additionalValidations && additionalValidations(control.value) || validObj.valid) {
         settingsObject[settingVariableName] = parseFloat(control.value);
         return true;
     }
-    showError(`${controlID} is invalid: ${control.errorText}`)
+    showError(`<div name="${control.id}"> ${control.id} is invalid: ${validObj.message ??  ""}</div>`);
     return false;
 }
 /** additionalValidations takes a parameter with the value */
-function validateStringControl(controlID, settingsObject, settingVariableName, additionalValidations) {
-    var control = document.getElementById(controlID);
-    if(additionalValidations && additionalValidations(control.value) || control.checkValidity()) {
+function validateStringControl(controlIDOrElement, settingsObject, settingVariableName, additionalValidations) {
+    const validObj = validateInput(controlIDOrElement);
+    const control = validObj.control;
+    clearErrors(control.id);
+    if(additionalValidations && additionalValidations(control.value) || validObj.valid) {
         settingsObject[settingVariableName && settingVariableName.trim().length ? settingVariableName : controlID] = control.value;
         return true;
     }
-    showError(`${controlID} is invalid: ${control.errorText}`)
+    showError(`<div name="${control.id}"> ${control.id} is invalid: ${validObj.message ??  ""}</div>`);
     return false;
 }
-/** 
- * Validates the pin number values in the forms inputs. 
+
+function validatePin(pin, pinName, assignedPins, duplicatePins, isInput, invalidPins) {
+    if(!Number.isInteger(pin) || pin < -1 || invalidPinsGlobal.indexOf(pin) > -1) {
+        invalidPins.push(pinName+" pin: "+pin);
+        return;
+    } else if(pin > -1) {
+        let pinDupeIndex = assignedPins.findIndex(x => x.pin === pin);
+        if(pinDupeIndex > -1) {
+            duplicatePins.push(pinName+" pin and "+assignedPins[pinDupeIndex].name);
+        }
+        if(isInput === true && inputOnlypins.indexOf(pin) == -1 && validPWMpins.indexOf(pin) == -1) {
+            invalidPins.push(pinName+" pin: "+pin);
+        }
+        assignedPins.push({name:pinName, pin:pin});
+    }
+}
+function validatePWMPin(pin, pinName, assignedPins, duplicatePins, pwmErrors, invalidPins) {
+    if(!Number.isInteger(pin) || pin < -1 || invalidPinsGlobal.indexOf(pin) > -1) {
+        invalidPins.push(pinName+" pin: "+pin);
+        return;
+    } else if(pin > -1) {
+        validatePin(pin, pinName, assignedPins, duplicatePins, false, invalidPins)
+        if(validPWMpins.indexOf(pin) == -1)
+            pwmErrors.push(pinName+" pin: "+pin);
+    }
+}
+function validateAnalogPin(pin, pinName, assignedPins, duplicatePins, invalidPins) {
+    if(pin > -1) {
+        validatePin(pin, pinName, assignedPins, duplicatePins, true, invalidPins);
+        if(adc1Pins.indexOf(pin) === -1 && adc2Pins.indexOf(pin) === -1) {
+            invalidPins.push(pinName + " pin: " + pin + " is not an ADC-capable pin.");
+        }
+    }
+}
+/**
+ * Checks how many channel outputs are routed to MCPWM or LEDC based on the
+ * current timer driver config, and warns when hardware limits would be exceeded.
+ * MCPWM: 2 groups × 3 operators × 2 generators = 12 max outputs.
+ * LEDC:  8 (S3) or 16 (ESP32) channels max.
+ * Mirrors the existing pin-contention pattern: shows an error but does NOT
+ * block saving (the firmware auto-falls-back at runtime).
+ */
+function validatePwmDriverContention() {
+    clearErrors("pwmDriverContention");
+    if(!systemInfo["availableTimers"]) return;
+
+    const mcpwmMax = systemInfo["mcpwmMaxOutputs"] || 12;
+    const ledcMax  = systemInfo["ledcMaxOutputs"]  || 16;
+
+    const counts = ESPTimer.getDriverCounts();
+
+    var warnings = [];
+    if(counts.mcpwm > mcpwmMax) {
+        warnings.push(
+            counts.mcpwm + " outputs assigned to MCPWM timers, but hardware supports " + mcpwmMax +
+            ". The " + (counts.mcpwm - mcpwmMax) + " extra output(s) will automatically fall back to LEDC."
+        );
+    }
+    if(counts.ledc > ledcMax) {
+        warnings.push(
+            counts.ledc + " outputs assigned to LEDC timers, but hardware supports " + ledcMax +
+            ". Reduce LEDC assignments or move some to MCPWM timers."
+        );
+    }
+
+    if(warnings.length) {
+        var errorString = "<div name='pwmDriverContention'><b>PWM driver resource warning:</b><br>" +
+            "<div style='margin-left:25px;color:white;'>" + warnings.join("<br>") + "</div></div>";
+        showError(errorString);
+    }
+}
+
+/**
+ * Validates the pin number values in the forms inputs.
  * Shows an error and returns the pin values or undefined if error
+ *
+ * BLDC does not return ALL pins..
 */
 function validatePins() {
     if(systemInfo.motorType == MotorType.BLDC) {
         return validateBLDCPins();
     }
-    clearErrors("pinValidation"); 
+    clearErrors("pinValidation");
     var assignedPins = [];
     var duplicatePins = [];
-    var pmwErrors = [];
-    var pinValues = getServoPinValues();
+    var pwmErrors = [];
+    var invalidPins = [];
+    var pinValues = [];
+    if(systemInfo.motorType == MotorType.BLDC)
+    {
+        assignCommonBLDCPins(assignedPins);
+        motorA.getBLDCPinValues(pinValues);
+        if(motorB)
+        {
+            motorB.getBLDCPinValues(pinValues);
+        }
+    } else {
+        getServoPinValues(pinValues);
+    }
+    getCommonPinValues(pinValues);
     if(userSettings["disablePinValidation"])
         return pinValues;
 
-    var pinDupeIndex = -1;
-    if(pinValues.rightPin > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.rightPin);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Right servo pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.rightPin) == -1)
-            pmwErrors.push("Right servo pin: "+pinValues.rightPin);
-        assignedPins.push({name:"Right servo", pin:pinValues.rightPin});
+    if(systemInfo.motorType == MotorType.BLDC)
+    {
+        motorA.validateBLDCPins(pinValues, assignedPins, duplicatePins, pwmErrors, invalidPins);
+        if(motorB)
+            motorB.validateBLDCPins(pinValues, assignedPins, duplicatePins, pwmErrors, invalidPins);
+    } else {
+        validatePWMPin(pinValues.rightPin, "Right servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+
+        // OSR / SR6
+        validatePWMPin(pinValues.leftPin, "Left servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+        validatePWMPin(pinValues.pitchLeft, "Pitch left servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+
+        // SR6
+        validatePWMPin(pinValues.rightUpper, "Right upper servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+        validatePWMPin(pinValues.leftUpper, "Left upper servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+        validatePWMPin(pinValues.pitchRight, "Pitch right servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
     }
 
-    if(pinValues.leftPin > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.leftPin);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Left servo pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.leftPin) == -1)
-            pmwErrors.push("Left servo pin: "+pinValues.leftPin);
-        assignedPins.push({name:"Left servo", pin:pinValues.leftPin});
-    }
+    validateCommonPWMPins(assignedPins, duplicatePins, pinValues, pwmErrors, invalidPins);
 
-    if(userSettings["sr6Mode"]) {
-        if(pinValues.rightUpper > -1) {
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.rightUpper);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Right upper servo pin and "+assignedPins[pinDupeIndex].name);
-            if(validPWMpins.indexOf(pinValues.rightUpper) == -1)
-                pmwErrors.push("Right upper servo pin: "+pinValues.rightUpper);
-            assignedPins.push({name:"Right upper servo", pin:pinValues.rightUpper});
-        }
-        if(pinValues.leftUpper > -1) {
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.leftUpper);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Left upper servo pin and "+assignedPins[pinDupeIndex].name);
-            if(validPWMpins.indexOf(pinValues.leftUpper) == -1)
-                pmwErrors.push("Left upper servo pin: "+pinValues.leftUpper);
-            assignedPins.push({name:"Left upper servo", pin:pinValues.leftUpper});
-        }
-        if(pinValues.pitchRight > -1) {
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.pitchRight);
-            if(pinDupeIndex> -1)
-                duplicatePins.push("Pitch right servo pin and "+assignedPins[pinDupeIndex].name);
-            if(validPWMpins.indexOf(pinValues.pitchRight) == -1)
-                pmwErrors.push("Pitch right servo pin: "+pinValues.pitchRight);
-            assignedPins.push({name:"Pitch right servo", pin:pinValues.pitchRight});
-        }
-    }
-
-    if(pinValues.pitchLeft > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.pitchLeft);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Pitch left servo pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.pitchLeft) == -1)
-            pmwErrors.push("Pitch left servo pin: "+pinValues.pitchLeft);
-        assignedPins.push({name:"Pitch left servo", pin:pinValues.pitchLeft});
-    }
-
-    validateCommonPWMPins(assignedPins, duplicatePins, pinValues);
-
-    var invalidPins = [];
     validateNonPWMPins(assignedPins, duplicatePins, invalidPins, pinValues);
 
-    if (duplicatePins.length || pmwErrors.length || invalidPins.length) {
+    if (duplicatePins.length || pwmErrors.length || invalidPins.length) {
         var errorString = "<div name='pinValidation'>Pins NOT saved due to invalid input.<br>";
         if(duplicatePins.length )
             errorString += "<div style='margin-left: 25px;'>The following pins are duplicated:<br><div style='color: white; margin-left: 25px;'>"+duplicatePins.join("<br>")+"</div></div>";
@@ -1704,13 +2582,13 @@ function validatePins() {
                 errorString += "<br>";
             errorString += "<div style='margin-left: 25px;'>The following pins are invalid:<br><div style='color: white; margin-left: 25px;'>"+invalidPins.join("<br>")+"</div></div>";
         }
-        if (pmwErrors.length) {
+        if (pwmErrors.length) {
             if(duplicatePins.length || invalidPins.length) {
                 errorString += "<br>";
-            } 
-            errorString += "<div style='margin-left: 25px;'>The following pins are invalid PWM pins:<br><div style='color: white; margin-left: 25px;'>"+pmwErrors.join("<br>")+"</div></div>";
+            }
+            errorString += "<div style='margin-left: 25px;'>The following pins are invalid PWM pins:<br><div style='color: white; margin-left: 25px;'>"+pwmErrors.join("<br>")+"</div></div>";
         }
-        
+
         errorString += "</div>";
         showError(errorString);
         return undefined;
@@ -1718,187 +2596,136 @@ function validatePins() {
     return pinValues;
 }
 
-
-function validateCommonPWMPins(assignedPins, duplicatePins, pinValues, pmwErrors) {
-
-    var pinDupeIndex =  -1;
-
-    if(pinValues.twistServo > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.twistServo);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Twist servo pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.twistServo) == -1)
-            pmwErrors.push("Twist servo pin: "+pinValues.twistServo);
-        assignedPins.push({name:"Twist servo", pin:pinValues.twistServo});
+// TODO do something with these hardcoded numbers.
+// Move them to readonly constants in system settings maybe.
+function assignCommonBLDCPins(assignedPins) {
+    if(isModuleType(ModuleType.S3))
+    {
+        if(isBoardType(BoardType.ZERO)) {
+            if(isBLDCSPI()) {
+                assignedPins.push({name: name+" SPI MOSI", pin:11});
+            }
+        } else {
+            // TODO validate this for N8R8
+            //assignedPins.push({name:"SPI1", pin:5});
+            assignedPins.push({name:name+" SPI CLK", pin:18});
+            assignedPins.push({name:name+" SPI MISO", pin:19});
+            if(isBLDCSPI()) {
+                assignedPins.push({name:name+" SPI MOSI", pin:23});
+            }
+        }
     }
-
-    if(pinValues.squeezeServo > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.squeezeServo);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Squeeze servo pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.squeezeServo) == -1)
-            pmwErrors.push("Squeeze servo pin: "+pinValues.squeezeServo);
-        assignedPins.push({name:"Squeeze servo", pin:pinValues.squeezeServo});
+    else
+    {
+        //assignedPins.push({name:"SPI1", pin:5});
+        assignedPins.push({name:name+" SPI CLK", pin:18});
+        assignedPins.push({name:name+" SPI MISO", pin:19});
+        if(isBLDCSPI()) {
+            assignedPins.push({name:name+" SPI MOSI", pin:23});
+        }
     }
+}
 
-    if(pinValues.valveServo > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.valveServo);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Valve servo pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.valveServo) == -1)
-            pmwErrors.push("Valve servo pin: "+pinValues.valveServo);
-        assignedPins.push({name:"Valve servo", pin:pinValues.valveServo});
-    }
-
-    if(pinValues.vibe0 > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.vibe0);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Vibe 1 pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.vibe0) == -1)
-            pmwErrors.push("Vibe 1 pin: "+pinValues.vibe0);
-        assignedPins.push({name:"Vibe 1", pin:pinValues.vibe0});
-    }
-
-    if(pinValues.vibe1 > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.vibe1);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Lube/Vibe 2 pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.vibe1) == -1)
-            pmwErrors.push("Lube/Vibe 1 pin: "+pinValues.vibe1);
-        assignedPins.push({name:"Lube/Vibe 1", pin:pinValues.vibe1});
-    }
-
-    if(pinValues.vibe2 > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.vibe2);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Vibe 3 pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.vibe2) == -1)
-            pmwErrors.push("Vibe 3 pin: "+pinValues.vibe2);
-        assignedPins.push({name:"Vibe 3", pin:pinValues.vibe2});
-    }
-
-    if(pinValues.vibe3 > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.vibe3);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Vibe 4 pin and "+assignedPins[pinDupeIndex].name);
-        if(validPWMpins.indexOf(pinValues.vibe3) == -1)
-            pmwErrors.push("Vibe 4 pin: "+pinValues.vibe3);
-        assignedPins.push({name:"Vibe 4", pin:pinValues.vibe3});
-    }
+function validateCommonPWMPins(assignedPins, duplicatePins, pinValues, pwmErrors, invalidPins) {
+    validatePWMPin(pinValues.twistServo, "Twist servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+    validatePWMPin(pinValues.squeezeServo, "Squeeze servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+    validatePWMPin(pinValues.valveServo, "Valve servo", assignedPins, duplicatePins, pwmErrors, invalidPins);
+    validatePWMPin(pinValues.vibe0, "Vibe 1", assignedPins, duplicatePins, pwmErrors, invalidPins);
+    validatePWMPin(pinValues.vibe1, "Vibe 2", assignedPins, duplicatePins, pwmErrors, invalidPins);
+    validatePWMPin(pinValues.vibe2, "Vibe 3", assignedPins, duplicatePins, pwmErrors, invalidPins);
+    validatePWMPin(pinValues.vibe3, "Vibe 4", assignedPins, duplicatePins, pwmErrors, invalidPins);
 
     if(userSettings.tempSleeveEnabled) {
-        if(pinValues.heat > -1) {
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.heat);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Heater pin and "+assignedPins[pinDupeIndex].name);
-            if(validPWMpins.indexOf(pinValues.heat) == -1)
-                pmwErrors.push("Heater pin: "+pinValues.heat);
-            assignedPins.push({name:"Heater", pin:pinValues.heat});
-        }
+        validatePWMPin(pinValues.heat, "Heater", assignedPins, duplicatePins, pwmErrors, invalidPins);
     }
-    
-    if(userSettings.tempInternalEnabled) {
-        if(pinValues.caseFanPin > -1) {
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.caseFanPin);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Case fan pin and "+assignedPins[pinDupeIndex].name);
-            if(validPWMpins.indexOf(pinValues.caseFanPin) == -1)
-                pmwErrors.push("Case fan pin: "+pinValues.caseFanPin);
-            assignedPins.push({name:"Case fan pin", pin:pinValues.caseFanPin});
-        }
+
+    if(userSettings.fanControlEnabled) {
+        validatePWMPin(pinValues.caseFanPin, "Case fan ", assignedPins, duplicatePins, pwmErrors, invalidPins);
     }
 }
 /** Does not show an error. Just returns true/false */
 function validateNonPWMPins(assignedPins, duplicatePins, invalidPins, pinValues) {
-
-    var pinDupeIndex = -1;
-
     if(userSettings.displayEnabled || userSettings.voiceEnabled || userSettings.batteryLevelEnabled) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === 21);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("I2C pin 21 and "+assignedPins[pinDupeIndex].name);
+        let enabledValues = [];
+        if(userSettings.displayEnabled) {
+            enabledValues.push("Display");
+        }
+        if(userSettings.voiceEnabled) {
+            enabledValues.push("Voice");
+        }
+        if(userSettings.batteryLevelEnabled) {
+            enabledValues.push("Battery level");
+        }
+        if(pinValues.i2cScl < 0) {
+            invalidPins.push("I2C SCL pin: "+pinValues.i2cScl + " and I2C modules enabled: " + enabledValues.join(","));
+        }
+        if(pinValues.i2cSda < 0) {
+            invalidPins.push("I2C SDA pin: "+pinValues.i2cSda + " and I2C modules enabled: " + enabledValues.join(","));
+        }
+        validatePin(pinValues.i2cSda, "I2C SDA", assignedPins, duplicatePins, false, invalidPins);
+        validatePin(pinValues.i2cScl, "I2C SCL", assignedPins, duplicatePins, false, invalidPins);
+    } else if(isMotorType(MotorType.BLDC) && isBLDCSPI()) {
+        if(pinValues.i2cScl < 0) {
+            invalidPins.push("I2C SCL pin: "+pinValues.i2cScl);
+        }
+        if(pinValues.i2cSda < 0) {
+            invalidPins.push("I2C SDA pin: "+pinValues.i2cSda);
+        }
+        validatePin(pinValues.i2cSda, "I2C SDA", assignedPins, duplicatePins, false, invalidPins);
+        validatePin(pinValues.i2cScl, "I2C SCL", assignedPins, duplicatePins, false, invalidPins);
+    }
 
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === 22);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("I2C pin 22 and "+assignedPins[pinDupeIndex].name);
-    }
-    
-    if(pinValues.lubeButton > -1) {
-        pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.lubeButton);
-        if(validPWMpins.indexOf(pinValues.lubeButton) == -1 && inputOnlypins.indexOf(pinValues.lubeButton) == -1)
-            invalidPins.push("Invalid Lube button pin: "+pinValues.lubeButton);
-        if(pinDupeIndex > -1)
-            duplicatePins.push("Lube button pin and "+assignedPins[pinDupeIndex].name);
-        assignedPins.push({name:"Lube button", pin:pinValues.lubeButton});
-    }
+    validatePin(pinValues.lubeButton, "Lube button", assignedPins, duplicatePins, true, invalidPins);
 
     if(userSettings.tempSleeveEnabled) {
-        if(pinValues.temp > -1) {
-            if(validPWMpins.indexOf(pinValues.temp) == -1 && inputOnlypins.indexOf(pinValues.temp) == -1)
-                invalidPins.push("Invalid Sleeve temp pin: "+pinValues.temp);
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.temp);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Temp pin and "+assignedPins[pinDupeIndex].name);
-            assignedPins.push({name:"Temp", pin:pinValues.temp});
-        }
+        validatePin(pinValues.temp, "Sleeve Temp", assignedPins, duplicatePins, true, invalidPins);
     }
     if(userSettings.tempInternalEnabled) {
-        if(pinValues.internalTemp > -1) {
-            if(validPWMpins.indexOf(pinValues.internalTemp) == -1 && inputOnlypins.indexOf(pinValues.internalTemp) == -1)
-                invalidPins.push("Invalid Internal temp pin: "+pinValues.internalTemp);
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.internalTemp);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Internal temp pin and "+assignedPins[pinDupeIndex].name);
-            assignedPins.push({name:"Internal temp", pin:pinValues.internalTemp});
-        }
+        validatePin(pinValues.internalTemp, "Internal temp", assignedPins, duplicatePins, true, invalidPins);
     }
 
-    if(userSettings.batteryLevelEnabled) {
-        // if(adc1Pins.indexOf(pinValues.Battery_Voltage_PIN) == -1) 
+    // if(userSettings.batteryLevelEnabled) {
+        // if(adc1Pins.indexOf(pinValues.Battery_Voltage_PIN) == -1)
         //     invalidPins.push("Battery voltage pin: "+pinValues.Battery_Voltage_PIN + " is not a valid adc1 pin.");
         // pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.Battery_Voltage_PIN);
         // if(pinDupeIndex > -1)
         //     duplicatePins.push("Battery voltage pin and "+assignedPins[pinDupeIndex].name);
         // assignedPins.push({name:"Battery voltage", pin:pinValues.Battery_Voltage_PIN});
-    }
-    
+    // }
+
     if(userSettings.feedbackTwist && pinValues.twistFeedBack) {
-        if(pinValues.twistFeedBack > -1) {
-            if(validPWMpins.indexOf(pinValues.twistFeedBack) == -1 && inputOnlypins.indexOf(pinValues.twistFeedBack) == -1)
-                invalidPins.push("Invalid Twist feedback pin: "+pinValues.twistFeedBack);
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === pinValues.twistFeedBack);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Twist feedback pin and "+assignedPins[pinDupeIndex].name);
-            assignedPins.push({name:"Twist feed back", pin:pinValues.twistFeedBack});
-        }
+        validatePin(pinValues.twistFeedBack, "Twist feedback", assignedPins, duplicatePins, true, invalidPins);
     }
-    
-    for(var i=0; i<pinValues.buttonSets.length; i++) {
-        var buttonSetPin = pinValues.buttonSets[i];
-        if(buttonSetPin > -1) {
-            if(validPWMpins.indexOf(buttonSetPin) == -1 && inputOnlypins.indexOf(buttonSetPin) == -1)
-                invalidPins.push("Invalid button set "+i+" pin: "+buttonSetPin);
-            pinDupeIndex = assignedPins.findIndex(x => x.pin === buttonSetPin);
-            if(pinDupeIndex > -1)
-                duplicatePins.push("Button set "+i+" pin and "+assignedPins[pinDupeIndex].name);
-            assignedPins.push({name:"Button set "+i, pin:pinDupeIndex});
+
+    validateAnalogPin(pinValues.voltage3v3, "3.3V monitor", assignedPins, duplicatePins, invalidPins);
+    validateAnalogPin(pinValues.voltage5v, "5V monitor", assignedPins, duplicatePins, invalidPins);
+    validateAnalogPin(pinValues.voltageBattery, "Battery monitor", assignedPins, duplicatePins, invalidPins);
+    validateAnalogPin(pinValues.voltageMotor, "Motor monitor", assignedPins, duplicatePins, invalidPins);
+    validateAnalogPin(pinValues.voltageBus, "Bus monitor", assignedPins, duplicatePins, invalidPins);
+
+    if(Buttons.isButtonSetsEnabled()) {
+        for(var i=0; i<pinValues.buttonSets.length; i++) {
+            var buttonSetPin = pinValues.buttonSets[i];
+            validatePin(buttonSetPin, "Button set "+i, assignedPins, duplicatePins, true, invalidPins);
         }
     }
 
-    if(duplicatePins.length || invalidPins.length) 
+    if(userSettings["BLDC_UseHallSensor"] && systemInfo.motorType == MotorType.BLDC) {
+        validatePin(pinValues.BLDC_HallEffect_PIN, "Hall effect", assignedPins, duplicatePins, false, invalidPins);
+    }
+
+    if(duplicatePins.length || invalidPins.length)
         return false;
     return true;
 }
 
-function getServoPinValues() {
-    var pinValues = {};
+function getServoPinValues(pinValues = {}) {
     pinValues.rightPin = parseInt(document.getElementById('RightServo_PIN').value);
     pinValues.leftPin = parseInt(document.getElementById('LeftServo_PIN').value);
     pinValues.rightUpper = parseInt(document.getElementById('RightUpperServo_PIN').value);
     pinValues.leftUpper = parseInt(document.getElementById('LeftUpperServo_PIN').value);
     pinValues.pitchRight = parseInt(document.getElementById('PitchRightServo_PIN').value);
     pinValues.pitchLeft = parseInt(document.getElementById('PitchLeftServo_PIN').value);
-    getCommonPinValues(pinValues);
     return pinValues;
 }
 
@@ -1910,86 +2737,98 @@ function getCommonPinValues(pinValues) {
     pinValues.vibe1 = parseInt(document.getElementById('Vibe1_PIN').value);
     pinValues.vibe2 = parseInt(document.getElementById('Vibe2_PIN').value);
     pinValues.vibe3 = parseInt(document.getElementById('Vibe3_PIN').value);
-    
+
     //pinValues.Battery_Voltage_PIN = parseInt(document.getElementById('Battery_Voltage_PIN').value);
 
     pinValues.heat = parseInt(document.getElementById('Heater_PIN').value);
 
     pinValues.caseFanPin = parseInt(document.getElementById('Case_Fan_PIN').value);
 
+    pinValues.i2cSda = parseInt(document.getElementById('i2cSda_PIN').value);
+    pinValues.i2cScl = parseInt(document.getElementById('i2cScl_PIN').value);
+
     pinValues.lubeButton = parseInt(document.getElementById('LubeButton_PIN').value);
     pinValues.temp = parseInt(document.getElementById('Temp_PIN').value);
     pinValues.internalTemp = parseInt(document.getElementById('Internal_Temp_PIN').value);
     pinValues.twistFeedBack = parseInt(document.getElementById('TwistFeedBack_PIN').value);
+    pinValues.voltage3v3 = parseInt(document.getElementById('Voltage_3V3_PIN').value);
+    pinValues.voltage5v = parseInt(document.getElementById('Voltage_5V_PIN').value);
+    pinValues.voltageBattery = parseInt(document.getElementById('Voltage_Battery_PIN').value);
+    pinValues.voltageMotor = parseInt(document.getElementById('Voltage_Motor_PIN').value);
+    pinValues.voltageBus = parseInt(document.getElementById('Voltage_Bus_PIN').value);
 
     var buttonSetPins = document.getElementsByName('buttonSetPins');
     pinValues.buttonSets = [];
     buttonSetPins.forEach((node, index) => {
         pinValues.buttonSets[index] = parseInt(document.getElementById('buttonSetPin'+index).value);;
     });
+    if(systemInfo.motorType == MotorType.BLDC)
+        pinValues.BLDC_HallEffect_PIN = parseInt(document.getElementById("BLDC_HallEffect_PIN").value);
 }
 
-function updateZeros() 
+function updateZeros()
 {
-    if(upDateTimeout !== null) 
+    if(upDateTimeout !== null)
     {
         clearTimeout(upDateTimeout);
     }
-    upDateTimeout = setTimeout(() => 
+    upDateTimeout = setTimeout(() =>
     {
-        clearErrors("zeroValidation"); 
+        const maxZero = 2500;
+        const minZero = 500;
+        clearErrors("zeroValidation");
         var validValue = true;
         var invalidValues = [];
         var RightServo_ZERO = parseInt(document.getElementById('RightServo_ZERO').value);
-        if(!RightServo_ZERO || RightServo_ZERO > 1750 || RightServo_ZERO < 1250)
+        if(!RightServo_ZERO || RightServo_ZERO > maxZero || RightServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Right servo ZERO")
         }
         var LeftServo_ZERO = parseInt(document.getElementById('LeftServo_ZERO').value);
-        if(!LeftServo_ZERO || LeftServo_ZERO > 1750 || LeftServo_ZERO < 1250)
+        if(!LeftServo_ZERO || LeftServo_ZERO > maxZero || LeftServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Left servo ZERO")
         }
         var RightUpperServo_ZERO = parseInt(document.getElementById('RightUpperServo_ZERO').value);
-        if(!RightUpperServo_ZERO || RightUpperServo_ZERO > 1750 || RightUpperServo_ZERO < 1250)
+        if(!RightUpperServo_ZERO || RightUpperServo_ZERO > maxZero || RightUpperServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Right upper servo ZERO")
         }
         var LeftUpperServo_ZERO = parseInt(document.getElementById('LeftUpperServo_ZERO').value);
-        if(!LeftUpperServo_ZERO || LeftUpperServo_ZERO > 1750 || LeftUpperServo_ZERO < 1250)
+        if(!LeftUpperServo_ZERO || LeftUpperServo_ZERO > maxZero || LeftUpperServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Left upper servo ZERO")
         }
         var PitchLeftServo_ZERO = parseInt(document.getElementById('PitchLeftServo_ZERO').value);
-        if(!PitchLeftServo_ZERO || PitchLeftServo_ZERO > 1750 || PitchLeftServo_ZERO < 1250)
+        if(!PitchLeftServo_ZERO || PitchLeftServo_ZERO > maxZero || PitchLeftServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Pitch left servo ZERO")
         }
         var PitchRightServo_ZERO = parseInt(document.getElementById('PitchRightServo_ZERO').value);
-        if(!PitchRightServo_ZERO || PitchRightServo_ZERO > 1750 || PitchRightServo_ZERO < 1250)
+        if(!PitchRightServo_ZERO || PitchRightServo_ZERO > maxZero || PitchRightServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Pitch right servo ZERO")
         }
         var ValveServo_ZERO = parseInt(document.getElementById('ValveServo_ZERO').value);
-        if(!ValveServo_ZERO || ValveServo_ZERO > 1750 || ValveServo_ZERO < 1250)
+        if(!ValveServo_ZERO || ValveServo_ZERO > maxZero || ValveServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Valve servo ZERO")
         }
         var TwistServo_ZERO = parseInt(document.getElementById('TwistServo_ZERO').value);
-        if(!TwistServo_ZERO || TwistServo_ZERO > 1750 || TwistServo_ZERO < 1250)
+        if(!TwistServo_ZERO || TwistServo_ZERO > maxZero || TwistServo_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Twist servo ZERO")
         }
         var Squeeze_ZERO = parseInt(document.getElementById('Squeeze_ZERO').value);
-        if(!Squeeze_ZERO || Squeeze_ZERO > 1750 || Squeeze_ZERO < 1250)
+        if(!Squeeze_ZERO || Squeeze_ZERO > maxZero || Squeeze_ZERO < minZero)
         {
             validValue = false;
             invalidValues.push("Squeeze servo ZERO")
@@ -2005,13 +2844,13 @@ function updateZeros()
             userSettings["PitchRightServo_ZERO"] = PitchRightServo_ZERO;
             userSettings["ValveServo_ZERO"] = ValveServo_ZERO;
             userSettings["TwistServo_ZERO"] = TwistServo_ZERO;
-            updateUserSettings();
+            updateUserSettings(0);
         }
         else
         {
-            showError("<div name='zeroValidation'>Zeros NOT saved due to invalid input.<br><div style='margin-left: 25px;'>The values should be between 1250 and 1750 for the following:<br><div style='color: white; margin-left: 25px;'>"+invalidValues.join("<br>")+"</div></div></div>");
+            showError("<div name='zeroValidation'>Zeros NOT saved due to invalid input.<br><div style='margin-left: 25px;'>The values should be between "+minZero+" and "+maxZero+" for the following:<br><div style='color: white; margin-left: 25px;'>"+invalidValues.join("<br>")+"</div></div></div>");
         }
-    }, 2000);
+    }, defaultDebounce);
 }
 function updateLubeAmount()
 {
@@ -2031,19 +2870,22 @@ function setDiplayIs32Px() {
 }
 function setDisplaySettings()
 {
-    userSettings["displayEnabled"] = document.getElementById('displayEnabled').checked;
+    const enabled = document.getElementById('displayEnabled').checked;
+    if(!userSettings["displayEnabled"] && enabled)
+        validatePins();
+    userSettings["displayEnabled"] = enabled;
     // userSettings["Display_Screen_Width"] = parseInt(document.getElementById('Display_Screen_Width').value);
     // userSettings["Display_Screen_Height"] = parseInt(document.getElementById('Display_Screen_Height').value);
 
-    // userSettings["Display_Rst_PIN"] = parseInt(document.getElementById('Display_Rst_PIN').value);
+    // pinoutSettings["Display_Rst_PIN"] = parseInt(document.getElementById('Display_Rst_PIN').value);
     userSettings["Display_I2C_Address"] = document.getElementById('Display_I2C_Address_text').value;
     userSettings["sleeveTempDisplayed"] = document.getElementById('sleeveTempDisplayed').checked;
     userSettings["internalTempDisplayed"] = document.getElementById('internalTempDisplayed').checked;
     userSettings["versionDisplayed"] = document.getElementById('versionDisplayed').checked;
-    if(validatePins()) {
-        setRestartRequired();
-        updateUserSettings();
-    }
+    setRestartRequired();
+    if(userSettings["displayEnabled"])
+        validatePins();
+    updateUserSettings();
 }
 function setDisplayAddress() {
     var selectValue = document.getElementById('Display_I2C_Address').value;
@@ -2053,51 +2895,92 @@ function setDisplayAddress() {
     updateUserSettings();
 }
 function setTempSettings() {
-    userSettings["tempSleeveEnabled"] = document.getElementById('tempSleeveEnabled').checked;
+    const enabled = document.getElementById('tempSleeveEnabled').checked;
+    if(!userSettings["tempSleeveEnabled"] && enabled)
+        validatePins();
+    userSettings["tempSleeveEnabled"] = enabled;
     userSettings["TargetTemp"] = parseFloat(document.getElementById('TargetTemp').value);
     userSettings["HeatPWM"] = parseInt(document.getElementById('HeatPWM').value);
     userSettings["HoldPWM"] = parseInt(document.getElementById('HoldPWM').value);
     userSettings["heaterThreshold"] = parseInt(document.getElementById('heaterThreshold').value);
     userSettings["heaterResolution"] = parseInt(document.getElementById('heaterResolution').value);
-    userSettings["heaterFrequency"] = parseInt(document.getElementById('heaterFrequency').value);
 
     Utils.toggleControlVisibilityByID('sleeveTempDisplayedRow', hasFeature(BuildFeature.TEMP) && userSettings["tempSleeveEnabled"]);
-    if(validatePins()) {
-        setRestartRequired();
-        updateUserSettings();
-    }
+    setRestartRequired();
+    updateUserSettings();
 }
 function setInternalTempSettings() {
-    userSettings["tempInternalEnabled"] = document.getElementById('tempInternalEnabled').checked;
-    userSettings["caseFanResolution"] = parseInt(document.getElementById('caseFanResolution').value);
-    userSettings["caseFanFrequency"] = parseInt(document.getElementById('caseFanFrequency').value);
-
-    Utils.toggleControlVisibilityByID('internalTempDisplayedRow', hasFeature(BuildFeature.TEMP) && userSettings["tempInternalEnabled"]);
+    const enabled = document.getElementById('tempInternalEnabled').checked;
+    if(!userSettings["tempInternalEnabled"] && enabled)
+    {
+        if(!validatePins())
+            return;
+    }
+    userSettings["tempInternalEnabled"] = enabled;
     setRestartRequired();
     updateUserSettings();
 }
 
 function toggleVoiceSettings() {
-    userSettings['voiceEnabled'] = document.getElementById('voiceEnabled').checked;  
-    if(validatePins()) {
-        setRestartRequired();
-        updateUserSettings();
-    }
-}
-function setVoiceSettings() {
-    userSettings['voiceMuted'] = document.getElementById('voiceMuted').checked;  
-    validateIntControl("voiceVolume", userSettings, "voiceVolume");
-    validateIntControl("voiceWakeTime", userSettings, "voiceWakeTime");
+    userSettings['voiceEnabled'] = document.getElementById('voiceEnabled').checked;
+    setRestartRequired();
+    if(userSettings["voiceEnabled"])
+        validatePins();
     updateUserSettings();
 }
-function setFanControl() {
-    userSettings["fanControlEnabled"] = document.getElementById('fanControlEnabled').checked;
-    toggleFanControlSettings(userSettings["fanControlEnabled"]);
-    
-    if(validatePins()) {
+function setVoiceSettings() {
+    userSettings['voiceMuted'] = document.getElementById('voiceMuted').checked;
+    if(validateIntControl("voiceVolume", userSettings, "voiceVolume") && validateIntControl("voiceWakeTime", userSettings, "voiceWakeTime")) {
         setRestartRequired();
-        updateUserSettings();
+        updateUserSettings(0);
     }
+}
+function setPWMResolution() {
+    debounceInput("setPWMResolution", function() {
+        if(validateIntControl("servoResolution", userSettings, "servoResolution")
+            && validateIntControl("vibeResolution", userSettings, "vibeResolution")
+            && validateIntControl("lubeResolution", userSettings, "lubeResolution"))
+        {
+            setRestartRequired();
+            updateUserSettings(0);
+        }
+    }, defaultDebounce);
+}
+function setFanControl() {
+    debounceInput("caseFanSettings", function() {
+        userSettings["fanControlEnabled"] = document.getElementById('fanControlEnabled').checked;
+        // toggleFanControlSettings(userSettings["fanControlEnabled"]);
+        const resolutionElement = document.getElementById('caseFanResolution');
+        const resolution = parseInt(resolutionElement.value);
+        const fanMaxElement = document.getElementById('caseFanMaxPWM');
+        let valid = true;
+        clearErrors("caseFanPWM");
+        clearErrors("caseFanResolution");
+        if(userSettings["caseFanResolution"] != resolution)
+        {
+            if(!resolutionElement.checkValidity()) {
+                showError("Invallid resolution: "+ resolution, "caseFanResolution");
+                valid = false;
+            } else {
+                userSettings["caseFanResolution"] = resolution;
+                const maxPWM = Math.pow(2, resolution) - 1;
+                // userSettings["caseFanMaxPWM"] = maxPWM;
+                fanMaxElement.max = maxPWM;
+            }
+        }
+        if(!fanMaxElement.checkValidity()) {
+            valid = false;
+            showError("Invallid PWM for the current resolution: "+ userSettings["caseFanResolution"], "caseFanPWM");
+        } else {
+            userSettings["caseFanMaxPWM"] = parseInt(fanMaxElement.value);
+        }
+
+        // Utils.toggleControlVisibilityByID('internalTempDisplayedRow', hasFeature(BuildFeature.TEMP) && userSettings["tempInternalEnabled"]);
+        if(validatePins() && valid) {
+            setRestartRequired();
+            updateUserSettings(0);
+        }
+    }, defaultDebounce);
 }
 
 function setFanOnTemp() {
@@ -2120,20 +3003,20 @@ function toggleFanControlSettings(enabled) {
         Utils.toggleElementShown(elements[i], enabled);
 }
 function connectWifi() {
-    
+
   /*   var xhr = new XMLHttpRequest();
     xhr.open("POST", "/connectWifi", true);
-    xhr.onreadystatechange = function() 
+    xhr.onreadystatechange = function()
     {
         if (xhr.readyState === 4) {
             var response = JSON.parse(xhr.responseText);
-            if (!response["connected"]) 
+            if (!response["connected"])
             {
                 var x = document.getElementById("errorMessage");
                 x.hidden = false;
                 x.text = "Error connection to wifi access point";
-            } 
-            else 
+            }
+            else
             {
                 infoNode.visibility = "visible";
                 infoNode.innerText = "Wifi Connected! IP Address: " + response["IPAddress"] + " Keep this IP address and restart the device. After rebooting enter the IP address into your browsers address bar.");
@@ -2144,8 +3027,8 @@ function connectWifi() {
     xhr.send(); */
 }
 
-function showWifiPassword() {
-    var x = document.getElementById('wifiPass');
+function togglePassword(id) {
+    var x = document.getElementById(id);
     if (x.type === "password") {
       x.type = "text";
     } else {
@@ -2159,15 +3042,25 @@ function updateWifiLoginSettings() {
     setRestartRequired();
     postWifiSettings();
 }
+function updateAPModeSettings() {
+    wifiSettings["apModeSSID"] = document.getElementById('apModeSSID').value;
+    wifiSettings["apModePass"] = document.getElementById('apModePass').value;
+    wifiSettings["apModeHidden"] = document.getElementById('apModeHidden').checked;
+    if(validateIntControl("apModeChannel", wifiSettings, "apModeChannel"))
+    {
+        setRestartRequired();
+        postWifiSettings();
+    }
+}
 
 function updateWifiSettings() {
-    if(staticIPAddressTimeout !== null) 
+    if(staticIPAddressTimeout !== null)
     {
         clearTimeout(staticIPAddressTimeout);
     }
     var staticIP = document.getElementById('staticIP').checked;
     toggleStaticIPSettings(staticIP);
-    staticIPAddressTimeout = setTimeout(() => 
+    staticIPAddressTimeout = setTimeout(() =>
     {
         var ips = {};
         ips.localIP = document.getElementById('localIPInput').value;
@@ -2175,17 +3068,23 @@ function updateWifiSettings() {
         ips.subnet = document.getElementById('subnetInput').value;
         ips.dns1 = document.getElementById('dns1Input').value;
         ips.dns2 = document.getElementById('dns2Input').value;
+        ips.apModeIP = document.getElementById('apModeIP').value;
+        ips.apModeSubnet = document.getElementById('apModeSubnet').value;
+        ips.apModeGateway = document.getElementById('apModeGateway').value;
         if(validateStaticIPAddresses(ips)) {
-            userSettings["staticIP"] = staticIP;
-            userSettings["localIP"] = ips.localIP;
-            userSettings["gateway"] = ips.gateway;
-            userSettings["subnet"] = ips.subnet;
-            userSettings["dns1"] = ips.dns1;
-            userSettings["dns2"] = ips.dns2;
+            wifiSettings["staticIP"] = staticIP;
+            wifiSettings["localIP"] = ips.localIP;
+            wifiSettings["gateway"] = ips.gateway;
+            wifiSettings["subnet"] = ips.subnet;
+            wifiSettings["dns1"] = ips.dns1;
+            wifiSettings["dns2"] = ips.dns2;
+            wifiSettings["apModeIP"] = ips.apModeIP;
+            wifiSettings["apModeGateway"] = ips.apModeGateway;
+            wifiSettings["apModeSubnet"] = ips.apModeSubnet;
             setRestartRequired();
-            updateUserSettings(0);
+            postWifiSettings(0);
         }
-    }, 3000);
+    }, defaultDebounce);
 }
 
 function validateStaticIPAddresses(ips) {
@@ -2206,10 +3105,19 @@ function validateStaticIPAddresses(ips) {
     if(ips.dns1 && ips.dns2.length > 0 && !isValidIP(ips.dns1)) {
         invalidIPS.push("Invalid static dns2 address");
     }
+    if(!isValidIP(ips.apModeIP)) {
+        invalidIPS.push("Invalid static AP mode IP address");
+    }
+    if(!isValidIP(ips.apModeGateway)) {
+        invalidIPS.push("Invalid static AP mode gateway address");
+    }
+    if(!isValidIP(ips.apModeSubnet)) {
+        invalidIPS.push("Invalid static AP mode subnet address");
+    }
     if(invalidIPS.length) {
         var errorString = "<div name='staticIPValidation'>Static Ip settings not saved due to invalid IP addresses<br>";
             errorString += "<div style='margin-left: 25px;'>The following addreses are invalid:<br><div style='color: white; margin-left: 25px;'>"+invalidIPS.join("<br>")+"</div></div>"
-        
+
         errorString += "</div>";
         showError(errorString);
         return false;
@@ -2217,11 +3125,6 @@ function validateStaticIPAddresses(ips) {
     return true;
 }
 
-
-function togglePitchServoFrequency(isChecked) 
-{
-    Utils.toggleControlVisibilityByID('pitchFrequencyRow', isChecked);
-}
 function toggleStaticIPSettings(isStatic)
 {
     Utils.toggleControlVisibilityByID('localIP', isStatic);
@@ -2230,17 +3133,20 @@ function toggleStaticIPSettings(isStatic)
     Utils.toggleControlVisibilityByID('dns1', isStatic);
     Utils.toggleControlVisibilityByID('dns2', isStatic);
 }
-function toggleDeviceOptions(sr6Mode)
+function toggleDeviceOptions(deviceType)
 {
-    var osrOnly = document.getElementsByClassName('osrOnly');
-    var sr6Only = document.getElementsByClassName('sr6Only');
-    for(var i=0;i < sr6Only.length; i++)
-        sr6Only[i].style.display = sr6Mode ? "flex" : "none";
-    for(var i=0;i < osrOnly.length; i++)
-        osrOnly[i].style.display = sr6Mode ? "none" : "flex";
-        
-    if(sr6Mode && userSettings["msPerRad"] == servoDegreeValue270) {
-        document.getElementById('msPerRadIs270').checked = true;
+    if(systemInfo.motorType === MotorType.Servo) {
+        // var osrOnly = document.getElementsByClassName('osrOnly');
+        // var sr6Only = document.getElementsByClassName('sr6Only');
+        // for(var i=0;i < sr6Only.length; i++)
+        //     sr6Only[i].style.display = deviceType == DeviceType.SR6 && deviceType != DeviceType.SSR1 ? "flex" : "none";
+        // for(var i=0;i < osrOnly.length; i++)
+        //     osrOnly[i].style.display = deviceType == DeviceType.OSR && deviceType != DeviceType.SSR1 ? "flex" : "none";
+        Utils.toggleControlVisibilityByClassName('osrOnly', deviceType == DeviceType.OSR);
+        Utils.toggleControlVisibilityByClassName('sr6Only', deviceType == DeviceType.SR6);
+    } else {
+        Utils.toggleControlVisibilityByClassName('SSR1Only', deviceType == DeviceType.SSR1);
+        Utils.toggleControlVisibilityByClassName('SSR2Only', deviceType == DeviceType.SSR2);
     }
 }
 
@@ -2260,14 +3166,108 @@ function toggleNonTCodev3Options()
 
 function updateBlueToothSettings()
 {
-    userSettings["bluetoothEnabled"] = document.getElementById('bluetoothEnabled').checked;
-    if(userSettings["bluetoothEnabled"])
-        alert("EXPEREMENTAL! this is a bit slow and will not work will with fast input!\nThis will DISABLE Wifi connection and this configuration web page upon device reboot!\nThe BLE app will be REQUIRED for future configuration changes.")
-	setRestartRequired();
-	updateUserSettings();
+    const element = document.getElementById('bluetoothEnabled');
+    let value = element.checked;
+    if(value && systemInfo["moduleType"] == ModuleType.WROOM32) {
+        if(wifiSettings["bleEnabled"]) {
+            alert("BLE and Bluetooth classic cannot be enabled at the same time due to ram constraints.")
+            element.checked = false;
+            return;
+        }
+        let message = "This will disable this web server. The Wroom32 chip does not have enough memory for bluetooth and the web server.\n\nYou will need to disable bluetooth to see this web page again.\n\nMost settings can be configured via tcode command #setting.\nUse the tcode command #help for more information\n\nUDP TCode will probably still work.\n\nYuu will be able to continue configuration on this page until you reboot the board.";
+        if(confirm(message+"\n\nContinue?")) {
+            wifiSettings["bluetoothEnabled"] = value;
+            setRestartRequired();
+            postWifiSettings();
+        } else {
+            element.checked = false;
+        }
+    } else {
+        wifiSettings["bluetoothEnabled"] = value;
+        setRestartRequired();
+        postWifiSettings();
+    }
+}
+function toggleBluetoothSettings() {
+
+    if(!hasFeature(BuildFeature.BLUETOOTH)) {
+        const elements = document.getElementsByClassName("bluetoothOnly")
+        for(var i=0;i < elements.length; i++){
+            elements[i].classList.add("hidden");
+        };
+    }
+}
+function updateBleSettings()
+{
+    const element = document.getElementById('bleEnabled');
+    let value = element.checked;
+    if(value && systemInfo["moduleType"] == ModuleType.WROOM32) {
+        if(wifiSettings["bluetoothEnabled"]) {
+            alert("BLE and Bluetooth classic cannot be enabled at the same time due to ram constraints.")
+            element.checked = false;
+            return;
+        }
+        let message = "This will disable this web server. The Wroom32 chip does not have enough memory for bluetooth and the web server.\n\nYou will need to disable bluetooth to see this web page again.\n\nMost settings can be configured via tcode command #setting.\nUse the tcode command #help for more information\n\nUDP TCode will probably still work.\n\nYuu will be able to continue configuration on this page until you reboot the board.";
+        if(confirm(message+"\n\nContinue?")) {
+            wifiSettings["bleEnabled"] = value;
+            setRestartRequired();
+            postWifiSettings();
+        } else {
+            element.checked = false;
+        }
+    } else {
+        wifiSettings["bleEnabled"] = value;
+        setRestartRequired();
+        postWifiSettings();
+    }
+    toggleBLEDeviceTypes(wifiSettings["bleEnabled"]);
 }
 
-function setTCodeVersion() 
+function toggleBLESettings() {
+    if(!hasFeature(BuildFeature.BLE)) {
+        const elements = document.getElementsByClassName("BLEOnly")
+        for(var i=0;i < elements.length; i++){
+            elements[i].classList.add("hidden");
+        };
+        return;
+    }
+}
+
+function toggleBLEDeviceTypes() {
+    const elements = document.getElementsByClassName("BLEEnabled")
+
+    for(var i=0;i < elements.length; i++){
+        if(wifiSettings["bleEnabled"] && hasFeature(BuildFeature.BLE))
+            elements[i].classList.remove("hidden");
+        else
+            elements[i].classList.add("hidden");
+    };
+
+}
+
+function setBLEDeviceType() {
+    wifiSettings["bleDeviceType"] = parseInt(document.getElementById('bleDeviceType').value);
+    toggleBLELoveDeviceTypes();
+    setRestartRequired();
+    postWifiSettings();
+}
+
+function toggleBLELoveDeviceTypes() {
+    const elements = document.getElementsByClassName("BLELoveOnly");
+    for(var i=0;i < elements.length; i++){
+        if(wifiSettings["bleDeviceType"] == BLEDeviceType.LOVE && hasFeature(BuildFeature.BLE))
+            elements[i].classList.remove("hidden");
+        else
+            elements[i].classList.add("hidden");
+    };
+}
+function setBLELoveDeviceType() {
+    wifiSettings["bleLoveDeviceType"] = parseInt(document.getElementById('bleLoveDeviceType').value);
+    setRestartRequired();
+    postWifiSettings();
+}
+
+function setTCodeVersion()
 {
     userSettings["TCodeVersion"] = parseInt(document.getElementById('TCodeVersion').value);
     toggleNonTCodev3Options()
@@ -2282,13 +3282,34 @@ function setRestartRequired() {
     }
 }
 
+function updateVibTimeout() {
+    userSettings["vibTimeout"] = parseInt(document.getElementById('vibTimeout').value);
+    userSettings["vibTimeoutEnabled"] = document.getElementById('vibTimeoutEnabled').checked;
+
+    updateUserSettings();
+}
 function updateLubeEnabled() {
     userSettings["lubeEnabled"] = document.getElementById('lubeEnabled').checked;
-    
-    if(validatePins()) {
-        setRestartRequired();
-        updateUserSettings();
+
+    setRestartRequired();
+    updateUserSettings();
+}
+function setupLubeButtonPinModes() {
+    const element = document.getElementById('lubeButtonPinMode');
+    if(!element) return;
+    removeAllChildren(element);
+    if(!systemInfo.lubeButtonPinModes || !systemInfo.lubeButtonPinModes.length) return;
+    for(let i=0;i<systemInfo.lubeButtonPinModes.length;i++) {
+        const option = document.createElement("option");
+        option.innerText = systemInfo.lubeButtonPinModes[i].name;
+        option.value = systemInfo.lubeButtonPinModes[i].value;
+        element.appendChild(option);
     }
+}
+function setLubeButtonPinMode() {
+    userSettings["lubeButtonPinMode"] = parseInt(document.getElementById('lubeButtonPinMode').value);
+    setRestartRequired();
+    updateUserSettings();
 }
 
 function toggleSounds() {
@@ -2302,12 +3323,15 @@ function toggleSounds() {
 function exportToJsonFile() {
     alert("Wifi password will NOT be exported!");
     const userSettingsCopy = JSON.parse(JSON.stringify(userSettings));
+    userSettingsCopy["esp32VersionNum"] = systemInfo.esp32VersionNum;
     //userSettingsCopy["wifiPass"] = "YOUR PASSWORD HERE";
     userSettingsCopy["wifiSettings"] = wifiSettings;
     //userSettingsCopy["wifiSettings"].wifiPass = "YOUR PASSWORD HERE";
     userSettingsCopy["motionDefaultProfileIndex"] = motionProviderSettings.motionDefaultProfileIndex;
     userSettingsCopy["motionProfiles"] = motionProviderSettings.motionProfiles;
     userSettingsCopy["buttonSettings"] = buttonSettings;
+    userSettingsCopy["pinoutSettings"] = pinoutSettings;
+    userSettingsCopy["channelsProfileSettings"] = channelsProfileSettings;
 
     let dataStr = JSON.stringify(userSettingsCopy);
     let dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
@@ -2326,8 +3350,8 @@ function createImportSettingsInputElement() {
     importSettingsInputElement.accept = "application/json,.json";
     importSettingsInputElement.addEventListener("change", importSettings)
 }
-function openImportSettingsFileDialog() {  
-    importSettingsInputElement.dispatchEvent(new MouseEvent("click")); 
+function openImportSettingsFileDialog() {
+    importSettingsInputElement.dispatchEvent(new MouseEvent("click"));
 }
 function importSettings() {
     alert("Wifi password will NOT be imported!");
@@ -2342,55 +3366,177 @@ function importSettings() {
                     return;
                 var importedValue = json[key];
                 var existingValue = userSettings[key];
+                var wifiValue = wifiSettings[key];
+
                 // If the key doesnt exist anymore, dont import it.
                 if(existingValue != undefined && existingValue != null)// 0 can be valid
-                    userSettings[key]=importedValue;
+                    userSettings[key] = checkMigrateData(key, importedValue, json["esp32VersionNum"]);
+                else if(wifiValue != undefined && wifiValue != null)// Not used
+                    wifiSettings[key] = checkMigrateData(key, importedValue, json["esp32VersionNum"]);
                 else
-                    handleImportRenames(key, importedValue)
+                    handleImportRenames(key, importedValue, json["esp32VersionNum"])
             });
             // If the new build doesnt have the old TCode version in it, set it to the latest version.
-            if(availableVersions.findIndex(x => x.version == userSettings.TCodeVersion) == -1) {
+            if(tcodeVersions.findIndex(x => x.value == userSettings.TCodeVersion) == -1) {
                 userSettings.TCodeVersion = latestTCodeVersion;
                 document.getElementById('TCodeVersion').value = userSettings["TCodeVersion"];
                 toggleNonTCodev3Options();
             }
+            setWifiSettings();
             setUserSettings();
-            if(validatePins()) {// Do not save if pin values are invalid.
-                setRestartRequired();
-                updateALLUserSettings();
-            }
+            setPinoutSettings();
+            setRestartRequired();
+            updateALLUserSettings();
         }, false);
 
         reader.readAsText(json);
     }
 }
 
-function handleImportRenames(key, value) {
+function checkMigrateData(key, value, firmwareVersion) {
+    if(!firmwareVersion && key == "TCodeVersion" && value == 1) {
+        return TCodeVersion.V3;
+    } else if(key == "boardType") {
+        if(!firmwareVersion || firmwareVersion < 0.39) {
+            if(value == 1) {
+                return BoardType.CRIMZZON;
+            } else if(value == 2) {
+                return BoardType.ISAAC;
+            }
+        }
+    } else if(key == "deviceType") {
+        if(!firmwareVersion || firmwareVersion < 0.497) {
+            if(value == 0) {
+                return DeviceType.OSR;
+            } else if(value == 1) {
+                return DeviceType.SR6;
+            } else if(value == 2) {
+                return DeviceType.SSR1;
+            } else if(value == 3) {
+                return DeviceType.TVIBE;
+            } else if(value == 4) {
+                return DeviceType.SSR2;
+            }
+        }
+    } else if(key == "BLDC_Encoder") {
+        if(!firmwareVersion || firmwareVersion < 0.497) {
+            if(value == 0) {
+                return BLDCEncoderType.MT6701;
+            } else if(value == 1) {
+                return BLDCEncoderType.SPI;
+            } else if(value == 2) {
+                return BLDCEncoderType.PWM;
+            }
+        }
+    }
+    return value;
+}
+
+function handleImportRenames(key, value, firmwareVersion) {
     switch(key) {
-        case "LubeManual_PIN": 
-        userSettings.LubeButton_PIN = value;
-        break;
-        case "motionProfiles": 
+        case "BLDC_MotorA_Voltage":
+        userSettings.BLDC_MotorA_VoltageLimit = value;
+        return;
+        case "LubeManual_PIN":
+        pinoutSettings.LubeButton_PIN = value;
+        return;
+        case "motionProfiles":
         motionProviderSettings.motionProfiles = value;
         motionProviderSettings.motionProfiles.forEach(x => {
             x.edited = true;
             x.channels.forEach(y => y.edited = true);
         });
-        break;
-        case "motionDefaultProfileIndex": 
+        return;
+        case "motionDefaultProfileIndex":
         motionProviderSettings.motionDefaultProfileIndex = value;
-        break;
-        case "wifiSettings": 
-        wifiSettings.ssid = value.ssid;
-        break;
-        case "ssid": 
+        return;
+        case "wifiSettings":
+        Object.keys(value).forEach(function(key,index) {
+            if(key !== "wifiPass")
+                wifiSettings[key] = value[key];
+        });
+        return;
+        case "ssid":
         wifiSettings.ssid = value;
-        break;
+        return;
+        case "staticIP":
+        wifiSettings.staticIP = value;
+        return;
+        case "localIP":
+        wifiSettings.localIP = value;
+        return;
+        case "gateway":
+        wifiSettings.gateway = value;
+        return;
+        case "subnet":
+        wifiSettings.subnet = value;
+        return;
+        case "dns1":
+        wifiSettings.dns1 = value;
+        return;
+        case "dns2":
+        wifiSettings.dns2 = value;
+        return;
+        case "udpServerPort":
+        wifiSettings.udpServerPort = value;
+        return;
+        case "webServerPort":
+        wifiSettings.webServerPort = value;
+        return;
+        case "hostname":
+        wifiSettings.hostname = value;
+        return;
+        case "friendlyName":
+        wifiSettings.friendlyName = value;
+        return;
         case "bootButtonCommand":
         buttonSettings.bootButtonCommand = value;
-        break;
-        case "buttonSettings": 
+        return;
+        case "buttonSettings":
         buttonSettings = value;
-        break;
+        // buttonSettings = {...buttonSettings, ...value}; // Merge objects? test this when adding property or removing?
+        return;
+        case "pinoutSettings":
+        Object.keys(value).forEach(function(key,index) {
+            pinoutSettings[key] = value[key];
+        });
+        return;
+        case "channelsProfileSettings":
+            channelsProfileSettings = value;
+        return;
+        case "sr6Mode":
+        if(isMotorType(MotorType.BLDC))
+            userSettings.deviceType = DeviceType.SSR1
+        else
+            userSettings.deviceType = value ? DeviceType.SR6 : DeviceType.OSR;
+        return;
+        case "BLDC_UsePWM":
+            userSettings.BLDC_Encoder = value ? BLDCEncoderType.PWM : BLDCEncoderType.SPI;
+            return;
+        case "BLDC_UseMT6701":
+            userSettings.BLDC_Encoder = value ? BLDCEncoderType.MT6701 : BLDCEncoderType.SPI;
+            return;
+        case "msPerRad":
+            if(value == 425)// 425 is msPerRad for 270 servo.
+                userSettings.maxServoRange = 270
+            return;
+        case "BLDC_MotorA_VoltageLimit":
+            userSettings.BLDC_Motor_VoltageLimit = value
+            return;
+        case "BLDC_MotorA_SupplyVoltage":
+            userSettings.BLDC_Motor_SupplyVoltage = value
+            return;
+        case "BLDC_MotorA_Current":
+            userSettings.BLDC_Motor_Current = value
+            return;
+        case "BLDC_MotorA_ParametersKnown":
+            userSettings.BLDC_Motor_ParametersKnown = value
+            return;
+        case "BLDC_MotorA_ZeroElecAngle":
+            userSettings.BLDC_Motor_ZeroElecAngle = value
+            return;
+    }
+    if(key.endsWith("_PIN")) {
+        pinoutSettings[key] = value;
     }
 }

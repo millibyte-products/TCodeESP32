@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,36 +19,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE. */
-    
+
 #pragma once
 
 #include <Arduino.h>
+#include "callback.h"
 
-void defaultCallback(const char* input) // Default callback used by TCode uses serial communication
-{
-    if (Serial)
-    {
-        Serial.println(input);
-    }
-}
 
 class TCodeBase {
 public:
-	virtual void setup(const char* firmware, const char* tcode) = 0;
-	// V0.3+ only
-	virtual void RegisterAxis(const String &ID, String axisName) = 0;
-	virtual void ByteInput(byte inByte) = 0;
-	virtual void StringInput(const String &input) = 0;
-	virtual void AxisInput(const String &ID, int magnitude, char extension, long extMagnitude) = 0;
-	virtual int AxisRead(const String &ID) = 0;
-	virtual unsigned long AxisLast(const String &ID) = 0;
-	virtual void getDeviceSettings(char* settings) = 0;
-	// V0.2+
-	void setMessageCallback(TCODE_FUNCTION_PTR_T f) // Sets the callback function used by TCode
+	virtual void setup(const char* firmware) = 0;
+	virtual void read(byte inByte) = 0;
+	virtual void read(const String &input) = 0;
+	virtual void setMessageCallback(TCodeCommandCallback f) // Sets the callback function used by TCode
 	{
 		if (f == nullptr)
 		{
-			message_callback = &defaultCallback;
+			message_callback = 0;
 		}
 		else
 		{
@@ -68,8 +55,23 @@ public:
         // 	message_callback(buf);
 		// 	return;
 		// }
+		LogHandler::debug(Tags::TCode, "[sendMessage] %s", input);
+		if(!message_callback)
+		{
+			LogHandler::debug(Tags::TCode, "[sendMessage] callback not defined");
+			message_callback = std::bind(&TCodeBase::defaultCallback, this, std::placeholders::_1);
+		}
+
         message_callback(input);
     }
-protected: 
-    TCODE_FUNCTION_PTR_T message_callback = &defaultCallback;
+protected:
+    std::function<void(const char*)> message_callback = 0;
+private:
+	void defaultCallback(const char* input) // Default callback used by TCode uses serial communication
+	{
+		if (Serial)
+		{
+			Serial.println(input);
+		}
+	}
 };

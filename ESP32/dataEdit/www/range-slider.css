@@ -1,6 +1,6 @@
 /* MIT License
 
-Copyright (c) 2024 Jason C. Fain
+Copyright (c) 2026 Jason C. Fain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,53 +28,50 @@ SOFTWARE. */
     display: flex;
     flex-direction: column;
     width: 80%;
-    margin-top: 8px;
     margin-left: auto;
     margin-right: auto;
     border-bottom: 1px solid cadetblue;
-    padding-bottom: 8px;
+    margin-bottom: 8px;
 }
 .range_container .range_container_header {
     font-size: 1.1em;
-    text-align: center;
-    margin-bottom: 18px;
-    font-weight: bold;
+    text-align: left;
+    font-weight: bold;  
 }
 .range_container .sliders_control {
     position: relative;
-    min-height: 20px;
+    min-height: 5px;
+    margin-bottom: 10px;
 }
   
 .range_container .form_control {
     position: relative;
     display: flex;
-    justify-content: space-between;
+    justify-content: space-between;  
+    margin-bottom: 12px;
 }
 .range_container .form_control_container {  
-    text-align: center;
+    text-align: right;
+    flex-basis: 25%;
 }
-.range_container .range_container input[type=range]::-webkit-slider-thumb {
+.range_container .form_control_container_label {  
+    margin-right: 2px;
+}
+.range_container .form_control_container_header {  
+    text-align: left;
+    flex-basis: 50%;
+}
+.range_container input[type=range]::-webkit-slider-thumb {
     -webkit-appearance: none;
+    appearance: none;
     pointer-events: all;
-    width: 24px;
-    height: 24px;
+    width: 16px;
+    height: 16px;
     background-color: #fff;
     border-radius: 50%;
     box-shadow: 0 0 0 1px #C6C6C6;
     cursor: pointer;
 }
-
-.range_container input[type=range]::-moz-range-thumb {
-    -webkit-appearance: none;
-    pointer-events: all;
-    width: 24px;
-    height: 24px;
-    background-color: #fff;
-    border-radius: 50%;
-    box-shadow: 0 0 0 1px #C6C6C6;
-    cursor: pointer;  
-}
-
 .range_container input[type=range]::-webkit-slider-thumb:hover {
     background: #f7f7f7;
 }
@@ -83,6 +80,27 @@ SOFTWARE. */
     box-shadow: inset 0 0 3px #387bbe, 0 0 9px #387bbe;
     -webkit-box-shadow: inset 0 0 3px #387bbe, 0 0 9px #387bbe;
 }
+
+.range_container input[type=range]::-moz-range-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    pointer-events: all;
+    width: 16px;
+    height: 16px;
+    background-color: #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px #C6C6C6;
+    cursor: pointer;  
+}
+.range_container input[type=range]::-moz-range-thumb :hover {
+    background: #f7f7f7;
+}
+
+.range_container input[type=range]::-moz-range-thumb :active {
+    box-shadow: inset 0 0 3px #387bbe, 0 0 9px #387bbe;
+    -webkit-box-shadow: inset 0 0 3px #387bbe, 0 0 9px #387bbe;
+}
+
 
 .range_container input[type="number"] {
     width: 50px;
@@ -102,14 +120,15 @@ SOFTWARE. */
 .range_container input[type="range"] {
     -webkit-appearance: none; 
     appearance: none;
-    height: 2px;
+    height: 6px;
     width: 100%;
     position: absolute;
-    background-color: #C6C6C6;
-    pointer-events: none;
+    pointer-events: none;  
+    border-radius: 25px;
 }
 
-#fromSlider {
+.fromSlider {
     height: 0;
-    z-index: 1;
+    z-index: 2;
+    background-color: transparent !important;
 }

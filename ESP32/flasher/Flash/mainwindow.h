@@ -14,7 +14,7 @@
 //#include <QNetworkConfigurationManager>
 //#include <QNetworkSession>
 
-#define VERSION 0.12f
+#define VERSION 0.13f
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -64,6 +64,7 @@ private:
     QProcess* flashProcess = 0;
     QSerialPort* m_serialPort = 0;
     QRegularExpression urlRegex;
+
 
     void sendSerial(QString data);
     bool checkAndConnectSerial();
